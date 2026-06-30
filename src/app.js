@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDatabase } from "./rag/db.js";
 import { createRagService } from "./rag/ragService.js";
-import { CHAT_MODES } from "./rag/llmProvider.js";
+import { ModeStore } from "./rag/modeStore.js";
 import { SettingsStore } from "./rag/settingsStore.js";
 import { SkillService } from "./rag/skills.js";
 
@@ -35,6 +35,7 @@ export async function createApp(options = {}) {
 
   const db = createDatabase(join(dataDir, "rag.sqlite"));
   const settingsStore = new SettingsStore(dataDir);
+  const modeStore = new ModeStore(dataDir);
   const skills = new SkillService({ projectRoot, dataDir });
   const rag = createRagService({
     db,
@@ -43,7 +44,8 @@ export async function createApp(options = {}) {
     logger: app.log,
     llmProvider: options.llmProvider,
     pythonCommand: options.pythonCommand,
-    settingsStore
+    settingsStore,
+    modeStore
   });
 
   app.decorate("rag", rag);
@@ -56,14 +58,11 @@ export async function createApp(options = {}) {
     embedding: rag.embeddings.describe()
   }));
 
-  app.get("/api/modes", async () =>
-    Object.entries(CHAT_MODES).map(([key, mode]) => ({
-      key,
-      label: mode.label,
-      aliases: mode.aliases,
-      hint: mode.hint
-    }))
-  );
+  app.get("/api/modes", async () => modeStore.list());
+
+  app.put("/api/modes", async (request) => modeStore.upsert(request.body || {}));
+
+  app.delete("/api/modes/:key", async (request) => modeStore.remove(decodeURIComponent(request.params.key)));
 
   app.get("/api/skills", async () => skills.list());
 

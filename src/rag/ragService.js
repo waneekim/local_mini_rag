@@ -19,13 +19,14 @@ export function createRagService(options) {
 }
 
 class RagService {
-  constructor({ db, dataDir, projectRoot, logger, llmProvider, pythonCommand, settingsStore }) {
+  constructor({ db, dataDir, projectRoot, logger, llmProvider, pythonCommand, settingsStore, modeStore }) {
     this.db = db;
     this.dataDir = dataDir;
     this.logger = logger;
     this._projectRoot = projectRoot;
     this._pythonCommand = pythonCommand;
     this.settingsStore = settingsStore;
+    this.modeStore = modeStore;
     this.worker = new WorkerClient({ projectRoot, pythonCommand });
 
     if (llmProvider) {
@@ -584,12 +585,16 @@ class RagService {
     const query = String(input.query || "").trim();
     if (!query) throw Object.assign(new Error("Query is required"), { statusCode: 400 });
     const envelope = await this.buildContext(profileId, input);
-    const mode = CHAT_MODES[input.mode] ? input.mode : "general";
+    const mode =
+      this.modeStore?.get(input.mode) ||
+      this.modeStore?.get("general") ||
+      this.modeStore?.list()[0] ||
+      CHAT_MODES[CHAT_MODES[input.mode] ? input.mode : "general"];
     const result = await this.llm.generate({
       query,
       messages: input.messages || [],
       envelope,
-      system: CHAT_MODES[mode].system
+      system: mode?.system
     });
     const at = nowIso();
     const runId = id("chat");

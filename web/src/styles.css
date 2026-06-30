@@ -1045,6 +1045,8 @@ input:focus, select:focus, textarea:focus {
 
 .mini-btn { min-height: 30px; height: 30px; padding: 0 12px; font-size: 0.82rem; }
 
+.mode-edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+
 /* ── Responsive ── */
 
 @media (max-width: 900px) {
