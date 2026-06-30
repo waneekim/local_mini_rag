@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createApp } from "../src/app.js";
-import { localNgramEmbedding } from "../src/rag/embedding.js";
+import { EmbeddingService, localNgramEmbedding } from "../src/rag/embedding.js";
 import { cosineSimilarity } from "../src/rag/vectorMath.js";
 
 test("local embeddings rank related text above unrelated text", () => {
@@ -12,6 +12,37 @@ test("local embeddings rank related text above unrelated text", () => {
   const related = localNgramEmbedding("고객 환불 정책은 구매 후 7일 이내에 처리됩니다.");
   const unrelated = localNgramEmbedding("오늘 점심 메뉴는 김치찌개입니다.");
   assert.ok(cosineSimilarity(query, related) > cosineSimilarity(query, unrelated));
+});
+
+test("http embedding backend uses OpenAI-compatible embeddings endpoint", async () => {
+  const calls = [];
+  const service = new EmbeddingService({
+    backend: "http",
+    embeddingsUrl: "http://embedding.local/v1/embeddings",
+    apiKey: "test-key",
+    model: "company-embedding",
+    fetchFn: async (url, options) => {
+      calls.push({ url, options });
+      return {
+        ok: true,
+        json: async () => ({
+          data: [
+            { index: 0, embedding: [1, 0] },
+            { index: 1, embedding: [0, 1] }
+          ]
+        })
+      };
+    }
+  });
+
+  const embeddings = await service.embed(["hello", "world"]);
+  assert.deepEqual(embeddings, [
+    [1, 0],
+    [0, 1]
+  ]);
+  assert.equal(calls[0].url, "http://embedding.local/v1/embeddings");
+  assert.equal(calls[0].options.headers.authorization, "Bearer test-key");
+  assert.equal(JSON.parse(calls[0].options.body).model, "company-embedding");
 });
 
 test("profile text sources can be indexed, searched, and isolated", async () => {

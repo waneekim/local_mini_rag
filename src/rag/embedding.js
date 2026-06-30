@@ -9,9 +9,12 @@ export class EmbeddingService {
     this.projectRoot = options.projectRoot || process.cwd();
     const venvPython = join(this.projectRoot, ".venv", "bin", "python");
     this.pythonCommand = options.pythonCommand || process.env.PYTHON || (existsSync(venvPython) ? venvPython : "python3");
+    this.fetchFn = options.fetchFn || globalThis.fetch;
     this.dimensions = Number(process.env.RAG_EMBEDDING_DIMENSIONS || options.dimensions || DEFAULT_DIMENSIONS);
-    this.backend = process.env.RAG_EMBEDDING_BACKEND || options.backend || "local-ngram";
-    this.model = process.env.RAG_EMBEDDING_MODEL || options.model || "intfloat/multilingual-e5-small";
+    this.embeddingsUrl = options.embeddingsUrl || process.env.EMBEDDINGS_URL || "";
+    this.apiKey = options.apiKey || process.env.EMBEDDINGS_API_KEY || process.env.LLM_API_KEY || "";
+    this.backend = process.env.RAG_EMBEDDING_BACKEND || options.backend || (this.embeddingsUrl ? "http" : "local-ngram");
+    this.model = process.env.EMBEDDINGS_MODEL || process.env.RAG_EMBEDDING_MODEL || options.model || "intfloat/multilingual-e5-small";
   }
 
   describe() {
@@ -19,15 +22,21 @@ export class EmbeddingService {
       backend: this.backend,
       model: this.model,
       dimensions: this.dimensions,
+      url: this.embeddingsUrl ? redactUrl(this.embeddingsUrl) : "",
       note:
         this.backend === "local-ngram"
-          ? "offline local n-gram embeddings; set RAG_EMBEDDING_BACKEND=python-e5 to enforce a model worker"
-          : "external worker backend"
+          ? "offline local n-gram embeddings; set EMBEDDINGS_URL or RAG_EMBEDDING_BACKEND=python-e5 to use another backend"
+          : this.backend === "http"
+            ? "OpenAI-compatible embeddings endpoint"
+            : "external worker backend"
     };
   }
 
   async embed(texts, options = {}) {
     if (!Array.isArray(texts)) throw new Error("embed() expects an array");
+    if (this.backend === "http") {
+      return this.embedWithHttp(texts);
+    }
     if (this.backend === "python-e5") {
       return this.embedWithPython(texts, options.mode || "passage");
     }
@@ -82,6 +91,34 @@ export class EmbeddingService {
 
       child.stdin.end(payload);
     });
+  }
+
+  async embedWithHttp(texts) {
+    if (!this.embeddingsUrl) throw new Error("EMBEDDINGS_URL is required for http embedding backend");
+    if (!this.fetchFn) throw new Error("fetch is not available in this Node runtime");
+
+    const response = await this.fetchFn(this.embeddingsUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {})
+      },
+      body: JSON.stringify({
+        model: this.model,
+        input: texts
+      })
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error?.message || payload.error || `Embeddings HTTP ${response.status}`);
+    }
+
+    const embeddings = normalizeEmbeddingsPayload(payload);
+    if (embeddings.length !== texts.length) {
+      throw new Error(`Embeddings response count ${embeddings.length} did not match input count ${texts.length}`);
+    }
+    return embeddings;
   }
 }
 
@@ -140,4 +177,25 @@ function fnv1a(value) {
     hash = Math.imul(hash, 0x01000193);
   }
   return hash >>> 0;
+}
+
+function normalizeEmbeddingsPayload(payload) {
+  if (Array.isArray(payload?.data)) {
+    return payload.data
+      .slice()
+      .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+      .map((item) => item.embedding);
+  }
+  if (Array.isArray(payload?.embeddings)) return payload.embeddings;
+  if (Array.isArray(payload?.embedding)) return [payload.embedding];
+  throw new Error("Embeddings response must contain data[].embedding or embeddings");
+}
+
+function redactUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    return "configured";
+  }
 }
