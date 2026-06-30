@@ -12,6 +12,7 @@ import {
   MessageSquare,
   Pencil,
   Plus,
+  RefreshCw,
   Search,
   Send,
   Settings,
@@ -39,6 +40,12 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [modes, setModes] = useState([]);
   const [chatMode, setChatMode] = useState("general");
+  const [skills, setSkills] = useState([]);
+  const [skillRepo, setSkillRepo] = useState("");
+  const [availableSkills, setAvailableSkills] = useState([]);
+  const [skillBusy, setSkillBusy] = useState(false);
+  const [agentFilter, setAgentFilter] = useState("");
+  const [mention, setMention] = useState(null); // { items, index } when typing @
 
   const [editingId, setEditingId] = useState("");
   const [editingName, setEditingName] = useState("");
@@ -86,6 +93,14 @@ function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // When searching, lazy-load every agent's sources so source-name matching works.
+  useEffect(() => {
+    if (!agentFilter.trim()) return;
+    for (const p of profiles) {
+      if (!sourcesByProfile[p.id]) loadSources(p.id);
+    }
+  }, [agentFilter, profiles]);
+
   useEffect(() => {
     function onClick() { setMenu(null); }
     function onKey(e) { if (e.key === "Escape") { setMenu(null); setTextDialog(null); } }
@@ -111,13 +126,15 @@ function App() {
   }, [job]);
 
   async function boot() {
-    const [healthPayload, profilePayload, modePayload] = await Promise.all([
+    const [healthPayload, profilePayload, modePayload, skillPayload] = await Promise.all([
       fetchJson("/v1/health"),
       fetchJson("/api/profiles"),
-      fetchJson("/api/modes").catch(() => [])
+      fetchJson("/api/modes").catch(() => []),
+      fetchJson("/api/skills").catch(() => [])
     ]);
     setHealth(healthPayload);
     setModes(modePayload);
+    setSkills(skillPayload);
     let list = profilePayload;
     if (!list.length) {
       const created = await fetchJson("/api/profiles", {
@@ -397,6 +414,21 @@ function App() {
       return;
     }
 
+    // Skill commands: /<skillname> runs on the last answer; /skills lists installed
+    if (cmd === "skills") {
+      pushSystem(
+        skills.length
+          ? "설치된 스킬:\n" + skills.map((s) => `/${s.name} — ${s.description || ""}`).join("\n")
+          : "설치된 스킬이 없습니다. 설정(⚙️) > 스킬에서 추가하세요."
+      );
+      return;
+    }
+    const skill = skills.find((s) => s.name.toLowerCase() === cmd || s.folder?.toLowerCase() === cmd);
+    if (skill) {
+      await runSkill(skill);
+      return;
+    }
+
     const pid = activeProfileId;
     if (!pid) { pushSystem("활성 Agent가 없습니다."); return; }
 
@@ -469,7 +501,15 @@ function App() {
               "/embed @except       임베딩 안 된 소스만 임베딩",
               "/list                전체 소스 목록",
               "/embed-list          임베딩된(대화재료) 소스 목록",
-              "/no-embed-list       임베딩 안 된 소스 목록"
+              "/no-embed-list       임베딩 안 된 소스 목록",
+              "",
+              "■ 스킬 (직전 답변을 가공)",
+              ...(skills.length ? skills.map((s) => `/${s.name}  ${s.description || ""}`) : ["  (설치된 스킬 없음 — 설정 > 스킬)"]),
+              "/skills              설치된 스킬 목록",
+              "",
+              "■ 기타",
+              "@<Agent>             해당 Agent의 임베딩으로 답변 (예: @Movie Agent 추천해줘)",
+              "왼쪽 검색창          Agent·소스 이름으로 필터"
             ].join("\n")
           );
           break;
@@ -485,28 +525,77 @@ function App() {
     }
   }
 
+  async function runSkill(skill) {
+    const lastAnswer = [...messages].reverse().find((m) => m.role === "assistant");
+    if (!lastAnswer) {
+      pushSystem(`스킬 '${skill.name}'을 적용할 직전 답변이 없습니다. 먼저 대화하세요.`);
+      return;
+    }
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    setBusy(true);
+    setStatus(`스킬 실행: ${skill.name}`);
+    try {
+      const payload = await fetchJson(`/api/skills/${encodeURIComponent(skill.name)}/run`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          profileId: activeProfileId,
+          agent: activeProfile?.name || "",
+          query: lastUser?.content || "",
+          answer: lastAnswer.content,
+          citations: lastAnswer.citations || [],
+          messages: messages.slice(-8).map((m) => ({ role: m.role, content: m.content }))
+        })
+      });
+      setMessages((prev) => [...prev, { id: `skill-${Date.now()}`, role: "skill", skill: skill.name, content: payload.output }]);
+      setStatus("스킬 완료");
+    } catch (e) {
+      pushSystem(`스킬 오류: ${e.message}`);
+    } finally {
+      setBusy(false);
+      setTimeout(() => inputRef.current?.focus(), 0);
+    }
+  }
+
+  function parseMention(text) {
+    for (const p of profiles) {
+      const tag = `@${p.name}`;
+      const idx = text.toLowerCase().indexOf(tag.toLowerCase());
+      if (idx !== -1) {
+        const cleanText = (text.slice(0, idx) + text.slice(idx + tag.length)).replace(/\s+/g, " ").trim();
+        return { profileId: p.id, agentName: p.name, cleanText };
+      }
+    }
+    return { profileId: "", agentName: "", cleanText: text };
+  }
+
   async function runChat() {
     const text = query.trim();
     if (!text || busy) return;
     if (text.startsWith("/")) {
       setQuery("");
+      setMention(null);
       await handleCommand(text);
       return;
     }
-    if (!activeProfileId) return;
+    const { profileId, agentName, cleanText } = parseMention(text);
+    const targetId = profileId || activeProfileId;
+    if (!targetId) return;
     setQuery("");
-    await sendMessage(text, chatMode);
+    setMention(null);
+    await sendMessage(cleanText || text, chatMode, targetId, agentName);
   }
 
-  async function sendMessage(text, mode) {
-    if (!activeProfileId) return;
+  async function sendMessage(text, mode, targetId = activeProfileId, agentName = "") {
+    if (!targetId) return;
     const modeLabel = modes.find((m) => m.key === mode)?.label;
-    const userMsg = { id: String(Date.now()), role: "user", content: text, mode, modeLabel };
+    const crossAgent = agentName && targetId !== activeProfileId ? agentName : "";
+    const userMsg = { id: String(Date.now()), role: "user", content: text, mode, modeLabel, agentName: crossAgent };
     setMessages((prev) => [...prev, userMsg]);
     setBusy(true);
     setStatus("답변 생성 중");
     try {
-      const payload = await fetchJson(`/api/profiles/${activeProfileId}/chat`, {
+      const payload = await fetchJson(`/api/profiles/${targetId}/chat`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ query: text, topK: 4, mode })
@@ -534,7 +623,32 @@ function App() {
     }
   }
 
+  function onQueryChange(e) {
+    const val = e.target.value;
+    setQuery(val);
+    const m = val.match(/@([^\s@]*)$/);
+    if (m) {
+      const q = m[1].toLowerCase();
+      const items = profiles.filter((p) => p.name.toLowerCase().includes(q)).slice(0, 6);
+      setMention(items.length ? { items, index: 0 } : null);
+    } else {
+      setMention(null);
+    }
+  }
+
+  function pickMention(p) {
+    setQuery((val) => val.replace(/@([^\s@]*)$/, `@${p.name} `));
+    setMention(null);
+    setTimeout(() => inputRef.current?.focus(), 0);
+  }
+
   function handleKeyDown(e) {
+    if (mention) {
+      if (e.key === "ArrowDown") { e.preventDefault(); setMention((mm) => ({ ...mm, index: (mm.index + 1) % mm.items.length })); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); setMention((mm) => ({ ...mm, index: (mm.index - 1 + mm.items.length) % mm.items.length })); return; }
+      if (e.key === "Enter") { e.preventDefault(); pickMention(mention.items[mention.index]); return; }
+      if (e.key === "Escape") { e.preventDefault(); setMention(null); return; }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       runChat();
@@ -582,10 +696,62 @@ function App() {
   }
 
   async function openSettings() {
-    const state = await fetchJson("/api/settings");
+    const [state, skillCfg] = await Promise.all([
+      fetchJson("/api/settings"),
+      fetchJson("/api/skills/config").catch(() => ({ repo: "" }))
+    ]);
     setSettingsState(state);
     loadPresetIntoForm(state, state.activePreset);
+    setSkillRepo(skillCfg.repo || "");
+    setAvailableSkills([]);
+    loadSkills();
     setSettingsOpen(true);
+  }
+
+  async function loadSkills() {
+    setSkills(await fetchJson("/api/skills").catch(() => []));
+  }
+
+  async function syncSkills() {
+    setSkillBusy(true);
+    try {
+      await fetchJson("/api/skills/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ repo: skillRepo })
+      });
+      const available = await fetchJson("/api/skills/sync", { method: "POST" });
+      setAvailableSkills(available);
+      setStatus(`스킬 저장소 동기화: ${available.length}개 발견`);
+    } catch (e) {
+      setStatus(`스킬 동기화 오류: ${e.message}`);
+      window.alert(`스킬 동기화 오류: ${e.message}`);
+    } finally {
+      setSkillBusy(false);
+    }
+  }
+
+  async function installSkill(name) {
+    setSkillBusy(true);
+    try {
+      await fetchJson("/api/skills/install", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name })
+      });
+      await loadSkills();
+      setStatus(`스킬 설치됨: ${name}`);
+    } catch (e) {
+      window.alert(`설치 오류: ${e.message}`);
+    } finally {
+      setSkillBusy(false);
+    }
+  }
+
+  async function removeSkill(name) {
+    if (!window.confirm(`스킬 '${name}'을 삭제할까요?`)) return;
+    await fetchJson(`/api/skills/${encodeURIComponent(name)}`, { method: "DELETE" });
+    await loadSkills();
   }
 
   async function switchPreset(name) {
@@ -817,6 +983,52 @@ function App() {
               </div>
             </div>
 
+            <div className="settings-section">
+              <h3>스킬 <span className="optional">(⚠️ 다운로드한 코드를 실행합니다)</span></h3>
+              <div className="settings-grid">
+                <label>
+                  사내 스킬 GitHub 저장소
+                  <div className="skill-repo-row">
+                    <input value={skillRepo} onChange={(e) => setSkillRepo(e.target.value)} placeholder="https://github.com/회사/skills.git" />
+                    <button type="button" className="secondary" onClick={syncSkills} disabled={skillBusy || !skillRepo.trim()}>
+                      <RefreshCw size={15} />동기화
+                    </button>
+                  </div>
+                </label>
+              </div>
+
+              {availableSkills.length > 0 && (
+                <div className="skill-group">
+                  <p className="skill-group-label">저장소 스킬</p>
+                  {availableSkills.map((s) => {
+                    const installed = skills.some((x) => x.name === s.name);
+                    return (
+                      <div key={s.name} className="skill-row">
+                        <div className="skill-meta"><strong>{s.name}</strong><span>{s.description}</span></div>
+                        <button type="button" className="secondary mini-btn" disabled={skillBusy || installed} onClick={() => installSkill(s.name)}>
+                          {installed ? "설치됨" : "설치"}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div className="skill-group">
+                <p className="skill-group-label">설치된 스킬 — 채팅에서 <code>/스킬이름</code></p>
+                {skills.length ? (
+                  skills.map((s) => (
+                    <div key={s.name} className="skill-row">
+                      <div className="skill-meta"><strong>/{s.name}</strong><span>{s.description}</span></div>
+                      <button type="button" className="mini danger" title="삭제" onClick={() => removeSkill(s.name)}><Trash2 size={13} /></button>
+                    </div>
+                  ))
+                ) : (
+                  <p className="empty tiny">설치된 스킬 없음 · 저장소 동기화 후 설치하거나 skills/ 폴더에 넣으세요</p>
+                )}
+              </div>
+            </div>
+
             <div className="modal-footer">
               <button type="button" className="secondary" onClick={() => setSettingsOpen(false)}>취소</button>
               <button type="button" onClick={saveSettings} disabled={!presetName.trim()}>저장 · 적용</button>
@@ -843,15 +1055,32 @@ function App() {
           <button className="icon-button" type="button" title="Agent 추가" onClick={createProfile}><Plus size={18} /></button>
         </div>
 
+        <div className="agent-search">
+          <Search size={14} />
+          <input value={agentFilter} onChange={(e) => setAgentFilter(e.target.value)} placeholder="Agent·소스 검색" />
+          {agentFilter && (
+            <button className="icon-button" type="button" title="지우기" onClick={() => setAgentFilter("")}><X size={14} /></button>
+          )}
+        </div>
+
         <section className="agent-list" aria-label="Agents">
-          {profiles.map((p) => {
-            const open = expandedIds.has(p.id);
-            const isActive = p.id === activeProfileId;
-            const list = sourcesByProfile[p.id] || [];
-            const embedded = list.filter((s) => s.status === "indexed").length;
-            const pending = list.length - embedded;
-            const tree = buildTree(list);
-            return (
+          {(() => {
+            const f = agentFilter.trim().toLowerCase();
+            const matchSrc = (s) => s.title.toLowerCase().includes(f) || (s.relative_path || "").toLowerCase().includes(f);
+            const visible = !f
+              ? profiles
+              : profiles.filter((p) => p.name.toLowerCase().includes(f) || (sourcesByProfile[p.id] || []).some(matchSrc));
+            if (f && !visible.length) return <p className="empty tiny">검색 결과 없음</p>;
+            return visible.map((p) => {
+              const list = sourcesByProfile[p.id] || [];
+              const nameMatch = !f || p.name.toLowerCase().includes(f);
+              const shownSources = !f || nameMatch ? list : list.filter(matchSrc);
+              const open = f ? true : expandedIds.has(p.id);
+              const isActive = p.id === activeProfileId;
+              const embedded = list.filter((s) => s.status === "indexed").length;
+              const pending = list.length - embedded;
+              const tree = buildTree(shownSources);
+              return (
               <div key={p.id} className={`agent ${isActive ? "active" : ""} ${dropTarget === p.id ? "drop" : ""}`}>
                 <div
                   className="agent-row"
@@ -923,8 +1152,9 @@ function App() {
                   </div>
                 )}
               </div>
-            );
-          })}
+              );
+            });
+          })()}
         </section>
       </aside>
 
@@ -962,11 +1192,15 @@ function App() {
                 </div>
               )}
               {messages.map((msg) =>
-                msg.role === "system" ? (
-                  <div key={msg.id} className="chat-system"><pre>{msg.content}</pre></div>
+                msg.role === "system" || msg.role === "skill" ? (
+                  <div key={msg.id} className={`chat-system ${msg.role === "skill" ? "skill" : ""}`}>
+                    {msg.role === "skill" && <div className="skill-tag">스킬: {msg.skill}</div>}
+                    <pre>{msg.content}</pre>
+                  </div>
                 ) : (
                   <div key={msg.id} className={`chat-bubble-row ${msg.role}`}>
                     <div className="chat-bubble">
+                      {msg.role === "user" && msg.agentName && <span className="bubble-mention">@{msg.agentName}</span>}
                       {msg.role === "user" && msg.modeLabel && msg.mode !== "general" && (
                         <span className="bubble-mode">{msg.modeLabel}</span>
                       )}
@@ -1011,15 +1245,29 @@ function App() {
                 </div>
               )}
               <div className="composer">
+                {mention && (
+                  <div className="mention-pop">
+                    {mention.items.map((p, i) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        className={`mention-item ${i === mention.index ? "active" : ""}`}
+                        onMouseDown={(e) => { e.preventDefault(); pickMention(p); }}
+                      >
+                        <Bot size={13} />{p.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <textarea
                   ref={inputRef}
                   value={query}
-                  onChange={(e) => setQuery(e.target.value)}
+                  onChange={onQueryChange}
                   onKeyDown={handleKeyDown}
                   placeholder={
                     activeMode && chatMode !== "general"
                       ? `[${activeMode.label}] ${activeMode.hint}`
-                      : "메시지 또는 /명령 입력… (Enter 전송 · Shift+Enter 줄바꿈)"
+                      : "메시지 / @Agent / 명령 입력… (Enter 전송 · Shift+Enter 줄바꿈)"
                   }
                   disabled={busy}
                   style={{ height: inputHeight }}

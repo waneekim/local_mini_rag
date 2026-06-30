@@ -1,0 +1,7 @@
+{
+  "name": "ux-report",
+  "description": "직전 답변을 UX 검토 리포트 형식으로 재정리합니다.",
+  "runtime": "python",
+  "entry": "run.py",
+  "input": "answer"
+}

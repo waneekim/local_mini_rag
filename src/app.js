@@ -10,6 +10,7 @@ import { createDatabase } from "./rag/db.js";
 import { createRagService } from "./rag/ragService.js";
 import { CHAT_MODES } from "./rag/llmProvider.js";
 import { SettingsStore } from "./rag/settingsStore.js";
+import { SkillService } from "./rag/skills.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, "..");
@@ -34,6 +35,7 @@ export async function createApp(options = {}) {
 
   const db = createDatabase(join(dataDir, "rag.sqlite"));
   const settingsStore = new SettingsStore(dataDir);
+  const skills = new SkillService({ projectRoot, dataDir });
   const rag = createRagService({
     db,
     dataDir,
@@ -61,6 +63,27 @@ export async function createApp(options = {}) {
       aliases: mode.aliases,
       hint: mode.hint
     }))
+  );
+
+  app.get("/api/skills", async () => skills.list());
+
+  app.get("/api/skills/config", async () => skills.getConfig());
+
+  app.put("/api/skills/config", async (request) => skills.setConfig({ repo: request.body?.repo ?? "" }));
+
+  app.post("/api/skills/sync", async () => skills.sync());
+
+  app.get("/api/skills/available", async () => skills.available());
+
+  app.post("/api/skills/install", async (request, reply) => {
+    const result = skills.install(request.body?.name);
+    return reply.code(201).send(result);
+  });
+
+  app.delete("/api/skills/:name", async (request) => skills.remove(decodeURIComponent(request.params.name)));
+
+  app.post("/api/skills/:name/run", async (request) =>
+    skills.run(decodeURIComponent(request.params.name), request.body || {})
   );
 
   app.get("/api/settings", async () => settingsStore.state());

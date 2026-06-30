@@ -181,6 +181,27 @@ input:focus, select:focus, textarea:focus {
   color: var(--muted);
 }
 
+.agent-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+
+.agent-search input {
+  border: 0;
+  background: transparent;
+  padding: 8px 0;
+  font-size: 0.86rem;
+}
+
+.agent-search input:focus { box-shadow: none; }
+.agent-search .icon-button { width: 26px; min-height: 26px; height: 26px; }
+
 .agent-list {
   display: flex;
   flex-direction: column;
@@ -539,6 +560,74 @@ input:focus, select:focus, textarea:focus {
   line-height: 1.6;
   color: var(--ink);
 }
+
+.chat-system.skill {
+  align-self: stretch;
+  max-width: 100%;
+  background: #eef5f2;
+  border-color: #cfe5dd;
+}
+
+.skill-tag {
+  display: inline-block;
+  margin-bottom: 8px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.chat-system.skill pre { font-family: inherit; font-size: 0.9rem; }
+
+/* @mention badge on user bubble */
+.bubble-mention {
+  display: inline-block;
+  margin-bottom: 5px;
+  margin-right: 5px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+/* @mention autocomplete */
+.mention-pop {
+  position: absolute;
+  left: 10px;
+  bottom: calc(100% + 6px);
+  z-index: 30;
+  min-width: 180px;
+  max-width: 280px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mention-item {
+  justify-content: flex-start;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 9px;
+  background: transparent;
+  color: var(--ink);
+  font-weight: 500;
+  font-size: 0.87rem;
+}
+
+.mention-item:hover,
+.mention-item.active { background: var(--bg); }
+.mention-item svg { color: var(--muted); }
+
+.composer { position: relative; }
 
 .chat-bubble-row {
   display: flex;
@@ -902,6 +991,43 @@ input:focus, select:focus, textarea:focus {
   gap: 8px;
   padding: 16px 22px;
 }
+
+/* Skills manager */
+.skill-repo-row { display: flex; gap: 8px; }
+.skill-repo-row input { flex: 1; }
+.skill-repo-row button { flex-shrink: 0; padding: 0 12px; }
+
+.skill-group { margin-top: 14px; }
+
+.skill-group-label {
+  margin: 0 0 8px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.skill-group-label code {
+  font-size: 0.74rem;
+  background: var(--bg);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.skill-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+
+.skill-row:first-of-type { border-top: 0; }
+
+.skill-meta { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.skill-meta strong { font-size: 0.88rem; }
+.skill-meta span { font-size: 0.8rem; color: var(--muted); overflow-wrap: anywhere; }
+
+.mini-btn { min-height: 30px; height: 30px; padding: 0 12px; font-size: 0.82rem; }
 
 /* ── Responsive ── */
 
