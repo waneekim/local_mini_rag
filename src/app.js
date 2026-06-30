@@ -137,6 +137,11 @@ export async function createApp(options = {}) {
     return reply.code(201).send({ sources });
   });
 
+  app.post("/api/profiles/:profileId/sources/url", async (request, reply) => {
+    const source = await rag.addUrlSource(request.params.profileId, request.body || {});
+    return reply.code(201).send(source);
+  });
+
   app.delete("/api/profiles/:profileId/sources/:sourceId", async (request) => {
     return rag.deleteSource(request.params.profileId, request.params.sourceId);
   });
