@@ -60,6 +60,7 @@ function App() {
   const [skillBusy, setSkillBusy] = useState(false);
   const [agentFilter, setAgentFilter] = useState("");
   const [suggest, setSuggest] = useState(null); // { type:"mention"|"command", items, index }
+  const [autoIndex, setAutoIndex] = useState(() => localStorage.getItem("rag.autoIndex") === "1");
 
   const [editingId, setEditingId] = useState("");
   const [editingName, setEditingName] = useState("");
@@ -113,6 +114,7 @@ function App() {
       { cmd: "embed-list", desc: "임베딩된(대화재료) 소스" },
       { cmd: "no-embed-list", desc: "임베딩 안 된 소스" },
       { cmd: "types", desc: "임베딩 가능한 파일 형식" },
+      { cmd: "autoindex", desc: "추가 시 자동 임베딩 켜기/끄기" },
       { cmd: "skills", desc: "설치된 스킬 목록" },
       { cmd: "help", desc: "도움말" }
     ];
@@ -290,6 +292,7 @@ function App() {
       const res = await fetchJson(`/api/profiles/${pid}/sources/files`, { method: "POST", body: form });
       await loadSources(pid);
       setStatus(`${res.sources.length}개 파일 추가됨`);
+      await maybeAutoIndex(res.sources.map((s) => s.id), pid);
     } catch (e) {
       pushSystem(`오류: ${e.message}`);
     } finally {
@@ -310,6 +313,7 @@ function App() {
       });
       await loadSources(pid);
       setStatus(`${res.sources.length}개 소스 추가됨`);
+      await maybeAutoIndex(res.sources.map((s) => s.id), pid);
       return res.sources.length;
     } finally {
       setBusy(false);
@@ -317,12 +321,14 @@ function App() {
   }
 
   async function addText(title, text, pid) {
-    await fetchJson(`/api/profiles/${pid}/sources/text`, {
+    const source = await fetchJson(`/api/profiles/${pid}/sources/text`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title, text })
     });
     await loadSources(pid);
+    await maybeAutoIndex([source.id], pid);
+    return source;
   }
 
   async function addUrl(url, title, pid) {
@@ -336,10 +342,23 @@ function App() {
       });
       await loadSources(pid);
       setStatus(`URL 소스 추가됨: ${source.title}`);
+      await maybeAutoIndex([source.id], pid);
       return source;
     } finally {
       setBusy(false);
     }
+  }
+
+  function toggleAutoIndex(value) {
+    const next = typeof value === "boolean" ? value : !autoIndex;
+    setAutoIndex(next);
+    localStorage.setItem("rag.autoIndex", next ? "1" : "0");
+    return next;
+  }
+
+  async function maybeAutoIndex(sourceIds, pid) {
+    if (!autoIndex || !sourceIds?.length) return;
+    await embedSources(sourceIds, pid);
   }
 
   async function removeSource(source) {
@@ -535,6 +554,13 @@ function App() {
       return;
     }
 
+    if (cmd === "autoindex" || cmd === "auto-embed") {
+      const on = /^(on|true|1|켜|켜기)$/i.test(rest) ? true : /^(off|false|0|꺼|끄기)$/i.test(rest) ? false : !autoIndex;
+      toggleAutoIndex(on);
+      pushSystem(`소스 추가 시 자동 임베딩: ${on ? "켜짐 ✅" : "꺼짐"}`);
+      return;
+    }
+
     const pid = activeProfileId;
     if (!pid) { pushSystem("활성 Agent가 없습니다."); return; }
 
@@ -617,6 +643,7 @@ function App() {
               "/embed-list          임베딩된(대화재료) 소스 목록",
               "/no-embed-list       임베딩 안 된 소스 목록",
               "/types               임베딩 가능한 파일 형식",
+              "/autoindex on|off    소스 추가 시 자동 임베딩",
               "",
               "■ 스킬 (직전 답변을 가공)",
               ...(skills.length ? skills.map((s) => `/${s.name}  ${s.description || ""}`) : ["  (설치된 스킬 없음 — 설정 > 스킬)"]),
@@ -1453,6 +1480,15 @@ function App() {
                     <button className="tool" type="button" title="폴더 추가" onClick={() => pickFolder(activeProfileId)}><FolderUp size={16} /></button>
                     <button className="tool" type="button" title="텍스트 추가" onClick={() => openTextDialog(activeProfileId)}><FileText size={16} /></button>
                     <button className="tool" type="button" title="URL 추가" onClick={() => openUrlDialog(activeProfileId)}><Link size={16} /></button>
+                    <span className="tool-sep" />
+                    <button
+                      className={`tool toggle ${autoIndex ? "on" : ""}`}
+                      type="button"
+                      title={`추가 시 자동 임베딩: ${autoIndex ? "켜짐" : "꺼짐"}`}
+                      onClick={() => toggleAutoIndex()}
+                    >
+                      <Zap size={16} />
+                    </button>
                   </div>
                   <button type="button" onClick={runChat} disabled={busy || !query.trim()} aria-label="전송" className="send-btn">
                     <Send size={18} />
