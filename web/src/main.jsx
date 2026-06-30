@@ -26,6 +26,19 @@ import "./styles.css";
 
 const API = "";
 
+const ACCEPTED_FILE_TYPES =
+  ".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xlsm,.xls,.txt,.md,.csv,.json,.html,.htm,.log,.png,.jpg,.jpeg,.tif,.tiff,.webp,.bmp";
+
+const SUPPORTED_TYPES_TEXT = [
+  "임베딩 가능한 입력:",
+  "• 문서: PDF, Word(.docx), PowerPoint(.pptx), Excel(.xlsx/.xlsm)",
+  "• 텍스트: .txt .md .csv .json .html .log",
+  "• 이미지(OCR): .png .jpg .jpeg .tif .webp  ← Tesseract 설치 필요",
+  "• 레거시 Office(.doc/.ppt/.xls)  ← LibreOffice 설치 필요",
+  "• 그 밖에: 붙여넣은 텍스트, URL, 로컬 폴더/파일 경로",
+  "최대 100MB/파일 · 한 번에 200개까지"
+].join("\n");
+
 function App() {
   const [profiles, setProfiles] = useState([]);
   const [activeProfileId, setActiveProfileId] = useState("");
@@ -563,6 +576,10 @@ function App() {
           pushSystem(formatSourceList("전체 소스", sources));
           break;
         }
+        case "types": {
+          pushSystem(SUPPORTED_TYPES_TEXT);
+          break;
+        }
         case "help": {
           const modeLines = modes.map((mo) => `/${mo.label}${" ".repeat(Math.max(1, 14 - mo.label.length))}${mo.hint}`);
           pushSystem(
@@ -582,6 +599,7 @@ function App() {
               "/list                전체 소스 목록",
               "/embed-list          임베딩된(대화재료) 소스 목록",
               "/no-embed-list       임베딩 안 된 소스 목록",
+              "/types               임베딩 가능한 파일 형식",
               "",
               "■ 스킬 (직전 답변을 가공)",
               ...(skills.length ? skills.map((s) => `/${s.name}  ${s.description || ""}`) : ["  (설치된 스킬 없음 — 설정 > 스킬)"]),
@@ -966,7 +984,7 @@ function App() {
   return (
     <main className="shell" style={{ "--sidebar-w": `${sidebarWidth}px`, "--citations-w": `${citationsWidth}px` }}>
       {/* Hidden file inputs */}
-      <input ref={fileInputRef} type="file" multiple hidden onChange={(e) => uploadEntries(fileListToEntries(e.target.files), uploadTargetRef.current)} />
+      <input ref={fileInputRef} type="file" multiple hidden accept={ACCEPTED_FILE_TYPES} onChange={(e) => uploadEntries(fileListToEntries(e.target.files), uploadTargetRef.current)} />
       <input ref={folderInputRef} type="file" multiple hidden webkitdirectory="" directory="" onChange={(e) => uploadEntries(fileListToEntries(e.target.files), uploadTargetRef.current)} />
 
       {/* Context menu */}
