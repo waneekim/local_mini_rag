@@ -59,7 +59,7 @@ function App() {
   const [availableSkills, setAvailableSkills] = useState([]);
   const [skillBusy, setSkillBusy] = useState(false);
   const [agentFilter, setAgentFilter] = useState("");
-  const [mention, setMention] = useState(null); // { items, index } when typing @
+  const [suggest, setSuggest] = useState(null); // { type:"mention"|"command", items, index }
 
   const [editingId, setEditingId] = useState("");
   const [editingName, setEditingName] = useState("");
@@ -102,6 +102,23 @@ function App() {
   }, [modes]);
 
   const activeMode = useMemo(() => modes.find((m) => m.key === chatMode) || null, [modes, chatMode]);
+
+  const commandList = useMemo(() => {
+    const modeCmds = modes.map((m) => ({ cmd: m.label, desc: `모드 · ${m.hint}` }));
+    const base = [
+      { cmd: "add", desc: "텍스트 / @경로 / URL을 소스로 추가" },
+      { cmd: "del", desc: "소스 삭제 (@소스명)" },
+      { cmd: "embed", desc: "임베딩 (@소스 / @all / @except)" },
+      { cmd: "list", desc: "전체 소스 목록" },
+      { cmd: "embed-list", desc: "임베딩된(대화재료) 소스" },
+      { cmd: "no-embed-list", desc: "임베딩 안 된 소스" },
+      { cmd: "types", desc: "임베딩 가능한 파일 형식" },
+      { cmd: "skills", desc: "설치된 스킬 목록" },
+      { cmd: "help", desc: "도움말" }
+    ];
+    const skillCmds = skills.map((s) => ({ cmd: s.name, desc: `스킬 · ${s.description || ""}` }));
+    return [...modeCmds, ...base, ...skillCmds];
+  }, [modes, skills]);
 
   useEffect(() => { boot(); }, []);
 
@@ -672,7 +689,7 @@ function App() {
     if (!text || busy) return;
     if (text.startsWith("/")) {
       setQuery("");
-      setMention(null);
+      setSuggest(null);
       await handleCommand(text);
       return;
     }
@@ -680,7 +697,7 @@ function App() {
     const targetId = profileId || activeProfileId;
     if (!targetId) return;
     setQuery("");
-    setMention(null);
+    setSuggest(null);
     await sendMessage(cleanText || text, chatMode, targetId, agentName);
   }
 
@@ -728,28 +745,39 @@ function App() {
   function onQueryChange(e) {
     const val = e.target.value;
     setQuery(val);
-    const m = val.match(/@([^\s@]*)$/);
-    if (m) {
-      const q = m[1].toLowerCase();
+    const at = val.match(/@([^\s@]*)$/);
+    if (at) {
+      const q = at[1].toLowerCase();
       const items = profiles.filter((p) => p.name.toLowerCase().includes(q)).slice(0, 6);
-      setMention(items.length ? { items, index: 0 } : null);
-    } else {
-      setMention(null);
+      setSuggest(items.length ? { type: "mention", items, index: 0 } : null);
+      return;
     }
+    const slash = val.match(/^\/([^\s]*)$/);
+    if (slash) {
+      const q = slash[1].toLowerCase();
+      const items = commandList.filter((c) => c.cmd.toLowerCase().includes(q)).slice(0, 8);
+      setSuggest(items.length ? { type: "command", items, index: 0 } : null);
+      return;
+    }
+    setSuggest(null);
   }
 
-  function pickMention(p) {
-    setQuery((val) => val.replace(/@([^\s@]*)$/, `@${p.name} `));
-    setMention(null);
+  function pickSuggest(item) {
+    if (suggest?.type === "mention") {
+      setQuery((val) => val.replace(/@([^\s@]*)$/, `@${item.name} `));
+    } else {
+      setQuery(`/${item.cmd} `);
+    }
+    setSuggest(null);
     setTimeout(() => inputRef.current?.focus(), 0);
   }
 
   function handleKeyDown(e) {
-    if (mention) {
-      if (e.key === "ArrowDown") { e.preventDefault(); setMention((mm) => ({ ...mm, index: (mm.index + 1) % mm.items.length })); return; }
-      if (e.key === "ArrowUp") { e.preventDefault(); setMention((mm) => ({ ...mm, index: (mm.index - 1 + mm.items.length) % mm.items.length })); return; }
-      if (e.key === "Enter") { e.preventDefault(); pickMention(mention.items[mention.index]); return; }
-      if (e.key === "Escape") { e.preventDefault(); setMention(null); return; }
+    if (suggest) {
+      if (e.key === "ArrowDown") { e.preventDefault(); setSuggest((s) => ({ ...s, index: (s.index + 1) % s.items.length })); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); setSuggest((s) => ({ ...s, index: (s.index - 1 + s.items.length) % s.items.length })); return; }
+      if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pickSuggest(suggest.items[suggest.index]); return; }
+      if (e.key === "Escape") { e.preventDefault(); setSuggest(null); return; }
     }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -1388,16 +1416,20 @@ function App() {
                 </div>
               )}
               <div className="composer">
-                {mention && (
+                {suggest && (
                   <div className="mention-pop">
-                    {mention.items.map((p, i) => (
+                    {suggest.items.map((item, i) => (
                       <button
-                        key={p.id}
+                        key={suggest.type === "mention" ? item.id : item.cmd}
                         type="button"
-                        className={`mention-item ${i === mention.index ? "active" : ""}`}
-                        onMouseDown={(e) => { e.preventDefault(); pickMention(p); }}
+                        className={`mention-item ${i === suggest.index ? "active" : ""}`}
+                        onMouseDown={(e) => { e.preventDefault(); pickSuggest(item); }}
                       >
-                        <Bot size={13} />{p.name}
+                        {suggest.type === "mention" ? (
+                          <><Bot size={13} />{item.name}</>
+                        ) : (
+                          <><span className="sug-cmd">/{item.cmd}</span><span className="sug-desc">{item.desc}</span></>
+                        )}
                       </button>
                     ))}
                   </div>
