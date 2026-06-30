@@ -1,0 +1,9 @@
+import { randomUUID } from "node:crypto";
+
+export function id(prefix) {
+  return `${prefix}_${randomUUID().replaceAll("-", "").slice(0, 20)}`;
+}
+
+export function nowIso() {
+  return new Date().toISOString();
+}
