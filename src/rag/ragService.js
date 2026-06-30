@@ -1,5 +1,5 @@
 import { createWriteStream, existsSync, readdirSync, statSync } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
+import { copyFile, mkdir, rm } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { all, one, run } from "./db.js";
@@ -296,6 +296,51 @@ class RagService {
     return created;
   }
 
+  async copySource(targetProfileId, input) {
+    this.ensureProfile(targetProfileId);
+    const fromProfileId = String(input.fromProfileId || "");
+    this.ensureProfile(fromProfileId);
+    const source = one(this.db, "SELECT * FROM sources WHERE id = ? AND profile_id = ?", input.sourceId, fromProfileId);
+    if (!source) throw Object.assign(new Error("Source not found"), { statusCode: 404 });
+    if (fromProfileId === targetProfileId) return source;
+
+    const newId = id("source");
+    // Copy uploaded files into the target profile so the copy is self-contained.
+    // In-place path-referenced files (outside the data dir) are shared as-is.
+    let newFilePath = source.file_path;
+    if (source.file_path && isInside(this.dataDir, source.file_path)) {
+      const rel = source.relative_path || basename(source.file_path);
+      newFilePath = join(this.dataDir, "uploads", targetProfileId, newId, rel);
+      await mkdir(dirname(newFilePath), { recursive: true });
+      await copyFile(source.file_path, newFilePath);
+    }
+
+    const at = nowIso();
+    const copy = { ...source, id: newId, profile_id: targetProfileId, file_path: newFilePath, created_at: at, updated_at: at };
+    insertSource(this.db, copy);
+
+    // Copy chunks with embeddings so the source is queryable immediately (same
+    // global embedding model => same vector space, no re-embedding required).
+    const chunks = all(this.db, "SELECT * FROM chunks WHERE source_id = ?", source.id);
+    for (const chunk of chunks) {
+      run(
+        this.db,
+        `INSERT INTO chunks (id, profile_id, source_id, chunk_index, text, locator_json, embedding_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        id("chunk"),
+        targetProfileId,
+        newId,
+        chunk.chunk_index,
+        chunk.text,
+        chunk.locator_json,
+        chunk.embedding_json,
+        chunk.created_at
+      );
+    }
+    touchProfile(this.db, targetProfileId);
+    return copy;
+  }
+
   async deleteSource(profileId, sourceId) {
     this.ensureProfile(profileId);
     const source = one(this.db, "SELECT * FROM sources WHERE id = ? AND profile_id = ?", sourceId, profileId);
@@ -514,7 +559,8 @@ class RagService {
       title: hit.title,
       locator: hit.locator,
       score: hit.score,
-      excerpt: excerpt(hit.text)
+      excerpt: excerpt(hit.text),
+      text: hit.text
     }));
 
     const contextText = search.hits
