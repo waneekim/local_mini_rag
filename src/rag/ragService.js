@@ -1,12 +1,12 @@
-import { createWriteStream } from "node:fs";
+import { createWriteStream, existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
-import { dirname, extname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { all, one, run } from "./db.js";
 import { EmbeddingService } from "./embedding.js";
 import { hashFile, hashText } from "./hash.js";
 import { id, nowIso } from "./ids.js";
-import { LlmProvider } from "./llmProvider.js";
+import { CHAT_MODES, LlmProvider } from "./llmProvider.js";
 import { basenameFromRelative, normalizeUploadedFileName, sanitizeFileName } from "./sanitize.js";
 import { chunkDocuments } from "./chunking.js";
 import { cosineSimilarity, lexicalScore } from "./vectorMath.js";
@@ -19,13 +19,62 @@ export function createRagService(options) {
 }
 
 class RagService {
-  constructor({ db, dataDir, projectRoot, logger, llmProvider, pythonCommand }) {
+  constructor({ db, dataDir, projectRoot, logger, llmProvider, pythonCommand, settingsStore }) {
     this.db = db;
     this.dataDir = dataDir;
     this.logger = logger;
-    this.embeddings = new EmbeddingService({ projectRoot, pythonCommand });
-    this.llm = llmProvider || new LlmProvider();
+    this._projectRoot = projectRoot;
+    this._pythonCommand = pythonCommand;
+    this.settingsStore = settingsStore;
     this.worker = new WorkerClient({ projectRoot, pythonCommand });
+
+    if (llmProvider) {
+      this.llm = llmProvider;
+      this.embeddings = new EmbeddingService({ projectRoot, pythonCommand });
+    } else {
+      this._applySettings(settingsStore?.get() || {});
+    }
+  }
+
+  _applySettings(settings) {
+    const llm = settings.llm || {};
+    this.llm = new LlmProvider({
+      provider: llm.provider || undefined,
+      baseUrl: llm.baseUrl || undefined,
+      model: llm.model || undefined,
+      apiKey: llm.apiKey || undefined
+    });
+    const emb = settings.embedding || {};
+    this.embeddings = new EmbeddingService({
+      projectRoot: this._projectRoot,
+      pythonCommand: this._pythonCommand,
+      backend: emb.backend || undefined,
+      embeddingsUrl: emb.url || undefined,
+      model: emb.model || undefined,
+      dimensions: emb.dimensions || undefined,
+      apiKey: emb.apiKey || undefined
+    });
+  }
+
+  applySettings(patch) {
+    if (!this.settingsStore) throw new Error("Settings store not configured");
+    const settings = this.settingsStore.savePreset(patch.name, patch);
+    this._applySettings(settings);
+    return settings;
+  }
+
+  selectPreset(name) {
+    if (!this.settingsStore) throw new Error("Settings store not configured");
+    const settings = this.settingsStore.selectPreset(name);
+    this._applySettings(settings);
+    return settings;
+  }
+
+  deletePreset(name) {
+    if (!this.settingsStore) throw new Error("Settings store not configured");
+    const settings = this.settingsStore.deletePreset(name);
+    this._applySettings(settings);
+    return settings;
   }
 
   listProfiles() {
@@ -55,6 +104,21 @@ class RagService {
 
   getProfile(profileId) {
     return one(this.db, "SELECT * FROM profiles WHERE id = ?", profileId);
+  }
+
+  updateProfile(profileId, input) {
+    this.ensureProfile(profileId);
+    const name = nonEmpty(input.name, null);
+    if (!name) throw Object.assign(new Error("Name is required"), { statusCode: 400 });
+    run(this.db, "UPDATE profiles SET name = ?, updated_at = ? WHERE id = ?", name, nowIso(), profileId);
+    return this.getProfile(profileId);
+  }
+
+  async deleteProfile(profileId) {
+    this.ensureProfile(profileId);
+    run(this.db, "DELETE FROM profiles WHERE id = ?", profileId);
+    await rm(join(this.dataDir, "uploads", profileId), { recursive: true, force: true }).catch(() => {});
+    return { ok: true };
   }
 
   ensureProfile(profileId) {
@@ -140,12 +204,60 @@ class RagService {
     return created;
   }
 
+  async addPathSources(profileId, inputPath) {
+    this.ensureProfile(profileId);
+    const target = String(inputPath || "").trim();
+    if (!target) throw Object.assign(new Error("Path is required"), { statusCode: 400 });
+    if (!existsSync(target)) throw Object.assign(new Error(`Path not found: ${target}`), { statusCode: 400 });
+
+    const stat = statSync(target);
+    const files = [];
+    if (stat.isDirectory()) {
+      const rootName = basename(target.replace(/\/+$/, "")) || "folder";
+      walkDir(target, rootName, files);
+    } else {
+      files.push({ abs: target, rel: basename(target) });
+    }
+    if (!files.length) throw Object.assign(new Error("No files found at path"), { statusCode: 400 });
+
+    const created = [];
+    for (const file of files) {
+      const fileName = basename(file.abs);
+      const at = nowIso();
+      const source = {
+        id: id("source"),
+        profile_id: profileId,
+        kind: kindFromFileName(fileName),
+        title: fileName,
+        file_name: fileName,
+        relative_path: file.rel,
+        mime_type: "",
+        file_path: file.abs,
+        pasted_text: "",
+        status: "pending",
+        error: "",
+        metadata_json: JSON.stringify({ input: "path", origin: file.abs }),
+        content_hash: await hashFile(file.abs),
+        created_at: at,
+        updated_at: at,
+        indexed_at: ""
+      };
+      insertSource(this.db, source);
+      created.push(source);
+    }
+    touchProfile(this.db, profileId);
+    return created;
+  }
+
   async deleteSource(profileId, sourceId) {
     this.ensureProfile(profileId);
     const source = one(this.db, "SELECT * FROM sources WHERE id = ? AND profile_id = ?", sourceId, profileId);
     if (!source) throw Object.assign(new Error("Source not found"), { statusCode: 404 });
     run(this.db, "DELETE FROM sources WHERE id = ? AND profile_id = ?", sourceId, profileId);
-    if (source.file_path) await rm(join(source.file_path), { force: true }).catch(() => {});
+    // Only remove files we copied into the data dir; never delete in-place path-referenced files.
+    if (source.file_path && isInside(this.dataDir, source.file_path)) {
+      await rm(source.file_path, { force: true }).catch(() => {});
+    }
     touchProfile(this.db, profileId);
     return { ok: true };
   }
@@ -379,10 +491,12 @@ class RagService {
     const query = String(input.query || "").trim();
     if (!query) throw Object.assign(new Error("Query is required"), { statusCode: 400 });
     const envelope = await this.buildContext(profileId, input);
+    const mode = CHAT_MODES[input.mode] ? input.mode : "search";
     const result = await this.llm.generate({
       query,
       messages: input.messages || [],
-      envelope
+      envelope,
+      system: CHAT_MODES[mode].system
     });
     const at = nowIso();
     const runId = id("chat");
@@ -458,6 +572,35 @@ function updateJob(db, jobId, patch) {
 
 function touchProfile(db, profileId) {
   run(db, "UPDATE profiles SET updated_at = ? WHERE id = ?", nowIso(), profileId);
+}
+
+const WALK_FILE_LIMIT = 2000;
+const SKIP_DIRS = new Set([".git", "node_modules", ".venv", "__pycache__", ".DS_Store", "dist"]);
+
+function walkDir(dir, relPrefix, out) {
+  if (out.length >= WALK_FILE_LIMIT) return;
+  let entries = [];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (out.length >= WALK_FILE_LIMIT) return;
+    if (entry.name.startsWith(".") || SKIP_DIRS.has(entry.name)) continue;
+    const abs = join(dir, entry.name);
+    const rel = `${relPrefix}/${entry.name}`;
+    if (entry.isDirectory()) {
+      walkDir(abs, rel, out);
+    } else if (entry.isFile()) {
+      out.push({ abs, rel });
+    }
+  }
+}
+
+function isInside(parent, child) {
+  const p = parent.endsWith("/") ? parent : `${parent}/`;
+  return child === parent || child.startsWith(p);
 }
 
 function kindFromFileName(fileName) {

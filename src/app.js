@@ -8,6 +8,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDatabase } from "./rag/db.js";
 import { createRagService } from "./rag/ragService.js";
+import { CHAT_MODES } from "./rag/llmProvider.js";
+import { SettingsStore } from "./rag/settingsStore.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, "..");
@@ -31,13 +33,15 @@ export async function createApp(options = {}) {
   });
 
   const db = createDatabase(join(dataDir, "rag.sqlite"));
+  const settingsStore = new SettingsStore(dataDir);
   const rag = createRagService({
     db,
     dataDir,
     projectRoot,
     logger: app.log,
     llmProvider: options.llmProvider,
-    pythonCommand: options.pythonCommand
+    pythonCommand: options.pythonCommand,
+    settingsStore
   });
 
   app.decorate("rag", rag);
@@ -50,11 +54,45 @@ export async function createApp(options = {}) {
     embedding: rag.embeddings.describe()
   }));
 
+  app.get("/api/modes", async () =>
+    Object.entries(CHAT_MODES).map(([key, mode]) => ({
+      key,
+      label: mode.label,
+      aliases: mode.aliases,
+      hint: mode.hint
+    }))
+  );
+
+  app.get("/api/settings", async () => settingsStore.state());
+
+  app.put("/api/settings", async (request) => {
+    rag.applySettings(request.body || {});
+    return settingsStore.state();
+  });
+
+  app.post("/api/settings/select", async (request) => {
+    rag.selectPreset(request.body?.name);
+    return settingsStore.state();
+  });
+
+  app.delete("/api/settings/:name", async (request) => {
+    rag.deletePreset(decodeURIComponent(request.params.name));
+    return settingsStore.state();
+  });
+
   app.get("/api/profiles", async () => rag.listProfiles());
 
   app.post("/api/profiles", async (request, reply) => {
     const profile = await rag.createProfile(request.body || {});
     return reply.code(201).send(profile);
+  });
+
+  app.patch("/api/profiles/:profileId", async (request) => {
+    return rag.updateProfile(request.params.profileId, request.body || {});
+  });
+
+  app.delete("/api/profiles/:profileId", async (request) => {
+    return rag.deleteProfile(request.params.profileId);
   });
 
   app.get("/api/profiles/:profileId/sources", async (request) => {
@@ -68,6 +106,11 @@ export async function createApp(options = {}) {
 
   app.post("/api/profiles/:profileId/sources/files", async (request, reply) => {
     const sources = await rag.addFileSources(request.params.profileId, request.parts());
+    return reply.code(201).send({ sources });
+  });
+
+  app.post("/api/profiles/:profileId/sources/path", async (request, reply) => {
+    const sources = await rag.addPathSources(request.params.profileId, request.body?.path || "");
     return reply.code(201).send({ sources });
   });
 

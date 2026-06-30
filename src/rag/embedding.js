@@ -10,18 +10,20 @@ export class EmbeddingService {
     const venvPython = join(this.projectRoot, ".venv", "bin", "python");
     this.pythonCommand = options.pythonCommand || process.env.PYTHON || (existsSync(venvPython) ? venvPython : "python3");
     this.fetchFn = options.fetchFn || globalThis.fetch;
-    this.dimensions = Number(process.env.RAG_EMBEDDING_DIMENSIONS || options.dimensions || DEFAULT_DIMENSIONS);
     this.embeddingsUrl = options.embeddingsUrl || process.env.EMBEDDINGS_URL || "";
+    // dimensions only matters for local-ngram (vector length). For http it's display-only.
+    this.configuredDimensions = options.dimensions ?? null;
+    this.dimensions = Number(options.dimensions || process.env.RAG_EMBEDDING_DIMENSIONS || DEFAULT_DIMENSIONS);
     this.apiKey = options.apiKey || process.env.EMBEDDINGS_API_KEY || process.env.LLM_API_KEY || "";
-    this.backend = process.env.RAG_EMBEDDING_BACKEND || options.backend || (this.embeddingsUrl ? "http" : "local-ngram");
-    this.model = process.env.EMBEDDINGS_MODEL || process.env.RAG_EMBEDDING_MODEL || options.model || "intfloat/multilingual-e5-small";
+    this.backend = options.backend || process.env.RAG_EMBEDDING_BACKEND || (this.embeddingsUrl ? "http" : "local-ngram");
+    this.model = options.model || process.env.EMBEDDINGS_MODEL || process.env.RAG_EMBEDDING_MODEL || "intfloat/multilingual-e5-small";
   }
 
   describe() {
     return {
       backend: this.backend,
       model: this.model,
-      dimensions: this.dimensions,
+      dimensions: this.backend === "http" ? this.configuredDimensions ?? "auto" : this.dimensions,
       url: this.embeddingsUrl ? redactUrl(this.embeddingsUrl) : "",
       note:
         this.backend === "local-ngram"
