@@ -7,7 +7,7 @@ import { EmbeddingService } from "./embedding.js";
 import { hashFile, hashText } from "./hash.js";
 import { id, nowIso } from "./ids.js";
 import { LlmProvider } from "./llmProvider.js";
-import { basenameFromRelative, sanitizeFileName } from "./sanitize.js";
+import { basenameFromRelative, normalizeUploadedFileName, sanitizeFileName } from "./sanitize.js";
 import { chunkDocuments } from "./chunking.js";
 import { cosineSimilarity, lexicalScore } from "./vectorMath.js";
 import { WorkerClient } from "./workerClient.js";
@@ -106,7 +106,7 @@ class RagService {
     for await (const part of parts) {
       if (part.type !== "file") continue;
       const sourceId = id("source");
-      const relativePath = sanitizeFileName(part.filename);
+      const relativePath = sanitizeFileName(normalizeUploadedFileName(part.filename));
       const fileName = basenameFromRelative(relativePath);
       const destination = join(this.dataDir, "uploads", profileId, sourceId, relativePath);
       await mkdir(dirname(destination), { recursive: true });

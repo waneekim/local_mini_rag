@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { createApp } from "../src/app.js";
 import { EmbeddingService, localNgramEmbedding } from "../src/rag/embedding.js";
+import { normalizeUploadedFileName, sanitizeFileName } from "../src/rag/sanitize.js";
 import { cosineSimilarity } from "../src/rag/vectorMath.js";
 
 test("local embeddings rank related text above unrelated text", () => {
@@ -43,6 +44,14 @@ test("http embedding backend uses OpenAI-compatible embeddings endpoint", async 
   assert.equal(calls[0].url, "http://embedding.local/v1/embeddings");
   assert.equal(calls[0].options.headers.authorization, "Bearer test-key");
   assert.equal(JSON.parse(calls[0].options.body).model, "company-embedding");
+});
+
+test("uploaded Korean filenames survive multipart mojibake", () => {
+  const original = "자료/한글파일 이름.xlsx";
+  const mojibake = Buffer.from(original, "utf8").toString("latin1");
+  assert.equal(normalizeUploadedFileName(mojibake), original);
+  assert.equal(sanitizeFileName(normalizeUploadedFileName(mojibake)), original);
+  assert.equal(normalizeUploadedFileName(original), original);
 });
 
 test("profile text sources can be indexed, searched, and isolated", async () => {
