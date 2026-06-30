@@ -38,7 +38,7 @@ function App() {
   const [activeCitations, setActiveCitations] = useState([]);
   const [busy, setBusy] = useState(false);
   const [modes, setModes] = useState([]);
-  const [chatMode, setChatMode] = useState("search");
+  const [chatMode, setChatMode] = useState("general");
 
   const [editingId, setEditingId] = useState("");
   const [editingName, setEditingName] = useState("");
@@ -967,7 +967,7 @@ function App() {
                 ) : (
                   <div key={msg.id} className={`chat-bubble-row ${msg.role}`}>
                     <div className="chat-bubble">
-                      {msg.role === "user" && msg.modeLabel && msg.mode !== "search" && (
+                      {msg.role === "user" && msg.modeLabel && msg.mode !== "general" && (
                         <span className="bubble-mode">{msg.modeLabel}</span>
                       )}
                       <p className="bubble-text">
@@ -1017,7 +1017,7 @@ function App() {
                   onChange={(e) => setQuery(e.target.value)}
                   onKeyDown={handleKeyDown}
                   placeholder={
-                    activeMode && chatMode !== "search"
+                    activeMode && chatMode !== "general"
                       ? `[${activeMode.label}] ${activeMode.hint}`
                       : "메시지 또는 /명령 입력… (Enter 전송 · Shift+Enter 줄바꿈)"
                   }

@@ -491,7 +491,7 @@ class RagService {
     const query = String(input.query || "").trim();
     if (!query) throw Object.assign(new Error("Query is required"), { statusCode: 400 });
     const envelope = await this.buildContext(profileId, input);
-    const mode = CHAT_MODES[input.mode] ? input.mode : "search";
+    const mode = CHAT_MODES[input.mode] ? input.mode : "general";
     const result = await this.llm.generate({
       query,
       messages: input.messages || [],

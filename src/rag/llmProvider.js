@@ -1,6 +1,16 @@
 const LANG_NOTE = "Answer in the same language as the user (Korean if the user writes Korean).";
 
 export const CHAT_MODES = {
+  general: {
+    label: "일반",
+    aliases: ["일반", "표준", "general", "chat"],
+    hint: "자유롭게 대화합니다. 관련 문서가 있으면 근거로 활용합니다.",
+    system:
+      "You are a helpful assistant. Converse naturally and helpfully with the user. " +
+      "If the provided local context is relevant, use it and cite sources with bracket numbers like [1]; " +
+      "otherwise answer from your general knowledge without forcing citations. " +
+      LANG_NOTE
+  },
   search: {
     label: "검색",
     aliases: ["검색", "search", "find"],
@@ -45,7 +55,7 @@ export const CHAT_MODES = {
   }
 };
 
-const DEFAULT_SYSTEM = CHAT_MODES.search.system;
+const DEFAULT_SYSTEM = CHAT_MODES.general.system;
 
 export class LlmProvider {
   constructor(options = {}) {
