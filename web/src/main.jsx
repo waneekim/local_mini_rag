@@ -9,6 +9,7 @@ import {
   FileText,
   Folder,
   FolderUp,
+  Link,
   MessageSquare,
   Pencil,
   Plus,
@@ -51,8 +52,10 @@ function App() {
   const [editingName, setEditingName] = useState("");
   const [menu, setMenu] = useState(null);
   const [textDialog, setTextDialog] = useState(null);
+  const [urlDialog, setUrlDialog] = useState(null);
   const [dlgTitle, setDlgTitle] = useState("");
   const [dlgText, setDlgText] = useState("");
+  const [dlgUrl, setDlgUrl] = useState("");
   const [dropTarget, setDropTarget] = useState(null);
   const [chatDragOver, setChatDragOver] = useState(false);
 
@@ -103,7 +106,7 @@ function App() {
 
   useEffect(() => {
     function onClick() { setMenu(null); }
-    function onKey(e) { if (e.key === "Escape") { setMenu(null); setTextDialog(null); } }
+    function onKey(e) { if (e.key === "Escape") { setMenu(null); setTextDialog(null); setUrlDialog(null); } }
     window.addEventListener("click", onClick);
     window.addEventListener("keydown", onKey);
     return () => {
@@ -292,6 +295,23 @@ function App() {
     await loadSources(pid);
   }
 
+  async function addUrl(url, title, pid) {
+    setBusy(true);
+    setStatus("URL 가져오는 중");
+    try {
+      const source = await fetchJson(`/api/profiles/${pid}/sources/url`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url, title })
+      });
+      await loadSources(pid);
+      setStatus(`URL 소스 추가됨: ${source.title}`);
+      return source;
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function removeSource(source) {
     await fetchJson(`/api/profiles/${source.profile_id}/sources/${source.id}`, { method: "DELETE" });
     await loadSources(source.profile_id);
@@ -369,6 +389,26 @@ function App() {
     }
   }
 
+  // ── URL dialog ──
+
+  function openUrlDialog(pid) {
+    setDlgTitle("");
+    setDlgUrl("");
+    setUrlDialog({ pid });
+  }
+
+  async function submitUrlDialog() {
+    if (!dlgUrl.trim()) return;
+    const pid = urlDialog.pid;
+    setUrlDialog(null);
+    try {
+      await addUrl(dlgUrl.trim(), dlgTitle.trim(), pid);
+    } catch (e) {
+      setStatus(`URL 오류: ${e.message}`);
+      window.alert(`URL을 추가하지 못했습니다: ${e.message}`);
+    }
+  }
+
   // ── Chat & commands ──
 
   function pushSystem(content) {
@@ -437,7 +477,10 @@ function App() {
       const sources = sourcesByProfile[pid] || (await loadSources(pid));
       switch (cmd) {
         case "add": {
-          if (rest.startsWith("@")) {
+          if (/^https?:\/\//i.test(rest)) {
+            const src = await addUrl(rest, "", pid);
+            pushSystem(`URL 소스 추가됨: ${src.title}`);
+          } else if (rest.startsWith("@")) {
             const path = rest.slice(1).trim();
             if (!path) { pushSystem("사용법: /add @<폴더 또는 파일 경로>"); break; }
             const n = await addPath(path, pid);
@@ -446,7 +489,7 @@ function App() {
             await addText("명령으로 추가한 텍스트", rest, pid);
             pushSystem(`텍스트 소스 추가됨 (${rest.length}자)`);
           } else {
-            pushSystem("사용법: /add <텍스트> 또는 /add @<경로>");
+            pushSystem("사용법: /add <텍스트> | /add @<경로> | /add <URL>");
           }
           break;
         }
@@ -495,6 +538,7 @@ function App() {
               "■ 소스 관리",
               "/add <텍스트>        텍스트를 소스로 추가",
               "/add @<경로>         로컬 파일/폴더를 소스로 추가",
+              "/add <URL>           웹페이지를 소스로 추가",
               "/del @<소스명>       소스 삭제",
               "/embed @<소스명>     해당 소스만 임베딩",
               "/embed @all          전체 소스 임베딩",
@@ -853,7 +897,7 @@ function App() {
             title={`${source.relative_path || source.title} · ${statusLabel(source.status)}`}
             onContextMenu={(e) => openMenu(e, { kind: "source", pid, source })}
           >
-            <File size={13} />
+            {source.kind === "url" ? <Link size={13} /> : <File size={13} />}
             <span className="tree-name">{name}</span>
             <span className={`src-dot ${source.status}`} title={statusLabel(source.status)} />
             <span className="tree-actions">
@@ -884,6 +928,7 @@ function App() {
               <button onClick={() => { pickFiles(menu.pid); setMenu(null); }}><Upload size={14} />파일 추가</button>
               <button onClick={() => { pickFolder(menu.pid); setMenu(null); }}><FolderUp size={14} />폴더 추가</button>
               <button onClick={() => { openTextDialog(menu.pid); setMenu(null); }}><FileText size={14} />텍스트 추가</button>
+              <button onClick={() => { openUrlDialog(menu.pid); setMenu(null); }}><Link size={14} />URL 추가</button>
             </>
           ) : (
             <>
@@ -911,6 +956,37 @@ function App() {
             <div className="modal-footer">
               <button type="button" className="secondary" onClick={() => setTextDialog(null)}>취소</button>
               <button type="button" onClick={submitTextDialog} disabled={!dlgText.trim()}>추가</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* URL dialog */}
+      {urlDialog && (
+        <div className="modal-overlay" onClick={() => setUrlDialog(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>URL 소스 추가</h2>
+              <button className="icon-button" type="button" onClick={() => setUrlDialog(null)}><X size={18} /></button>
+            </div>
+            <div className="settings-section">
+              <div className="settings-grid">
+                <label>
+                  URL
+                  <input
+                    value={dlgUrl}
+                    autoFocus
+                    onChange={(e) => setDlgUrl(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submitUrlDialog(); } }}
+                    placeholder="https://example.com/article"
+                  />
+                </label>
+                <label>제목 <span className="optional">(선택 · 비우면 페이지 제목)</span><input value={dlgTitle} onChange={(e) => setDlgTitle(e.target.value)} placeholder="제목" /></label>
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="secondary" onClick={() => setUrlDialog(null)}>취소</button>
+              <button type="button" onClick={submitUrlDialog} disabled={busy || !dlgUrl.trim()}>{busy ? "가져오는 중…" : "추가"}</button>
             </div>
           </div>
         </div>
@@ -1277,6 +1353,7 @@ function App() {
                     <button className="tool" type="button" title="파일 추가" onClick={() => pickFiles(activeProfileId)}><Upload size={16} /></button>
                     <button className="tool" type="button" title="폴더 추가" onClick={() => pickFolder(activeProfileId)}><FolderUp size={16} /></button>
                     <button className="tool" type="button" title="텍스트 추가" onClick={() => openTextDialog(activeProfileId)}><FileText size={16} /></button>
+                    <button className="tool" type="button" title="URL 추가" onClick={() => openUrlDialog(activeProfileId)}><Link size={16} /></button>
                   </div>
                   <button type="button" onClick={runChat} disabled={busy || !query.trim()} aria-label="전송" className="send-btn">
                     <Send size={18} />

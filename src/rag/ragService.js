@@ -204,6 +204,53 @@ class RagService {
     return created;
   }
 
+  async addUrlSource(profileId, input) {
+    this.ensureProfile(profileId);
+    const url = String(input.url || "").trim();
+    if (!/^https?:\/\//i.test(url)) {
+      throw Object.assign(new Error("유효한 http(s) URL이 필요합니다."), { statusCode: 400 });
+    }
+
+    let html;
+    try {
+      const response = await fetch(url, {
+        headers: { "user-agent": "Mozilla/5.0 (compatible; local-mini-rag)" },
+        redirect: "follow",
+        signal: AbortSignal.timeout(Number(process.env.RAG_URL_TIMEOUT_MS || 20_000))
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      html = await response.text();
+    } catch (error) {
+      throw Object.assign(new Error(`URL을 가져오지 못했습니다: ${error.message}`), { statusCode: 502 });
+    }
+
+    const { title, text } = htmlToText(html);
+    if (!text) throw Object.assign(new Error("페이지에서 텍스트를 추출하지 못했습니다."), { statusCode: 422 });
+
+    const at = nowIso();
+    const source = {
+      id: id("source"),
+      profile_id: profileId,
+      kind: "url",
+      title: nonEmpty(input.title, "") || title || url,
+      file_name: "",
+      relative_path: "",
+      mime_type: "text/html",
+      file_path: "",
+      pasted_text: text,
+      status: "pending",
+      error: "",
+      metadata_json: JSON.stringify({ input: "url", url }),
+      content_hash: hashText(text),
+      created_at: at,
+      updated_at: at,
+      indexed_at: ""
+    };
+    insertSource(this.db, source);
+    touchProfile(this.db, profileId);
+    return source;
+  }
+
   async addPathSources(profileId, inputPath) {
     this.ensureProfile(profileId);
     const target = String(inputPath || "").trim();
@@ -596,6 +643,32 @@ function walkDir(dir, relPrefix, out) {
       out.push({ abs, rel });
     }
   }
+}
+
+function htmlToText(html) {
+  let s = String(html || "").replace(/<(script|style|noscript|template|svg)[\s\S]*?<\/\1>/gi, " ");
+  const titleMatch = s.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = titleMatch ? decodeEntities(titleMatch[1]).replace(/\s+/g, " ").trim() : "";
+  s = s.replace(/<\/(p|div|li|h[1-6]|tr|section|article|header|footer|blockquote)>/gi, "\n");
+  s = s.replace(/<br\s*\/?>/gi, "\n");
+  s = s.replace(/<[^>]+>/g, " ");
+  s = decodeEntities(s)
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return { title, text: s };
+}
+
+function decodeEntities(text) {
+  const named = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", "#39": "'" };
+  return String(text || "").replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (match, code) => {
+    if (code[0] === "#") {
+      const num = code[1] === "x" || code[1] === "X" ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10);
+      return Number.isFinite(num) ? String.fromCodePoint(num) : match;
+    }
+    return named[code.toLowerCase()] ?? match;
+  });
 }
 
 function isInside(parent, child) {
