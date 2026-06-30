@@ -360,6 +360,42 @@ function App() {
     if (entries.length) await uploadEntries(entries, pid);
   }
 
+  async function copySourceTo(sourceId, fromProfileId, targetPid) {
+    if (!sourceId || !targetPid || fromProfileId === targetPid) return;
+    setBusy(true);
+    setStatus("소스 복사 중");
+    try {
+      const copy = await fetchJson(`/api/profiles/${targetPid}/sources/copy`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sourceId, fromProfileId })
+      });
+      await loadSources(targetPid);
+      setStatus(`소스 복사됨: ${copy.title}`);
+    } catch (e) {
+      pushSystem(`복사 오류: ${e.message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Agent drop: a source drag copies the source; otherwise treat as file upload.
+  async function onAgentDrop(e, targetPid) {
+    const raw = e.dataTransfer.getData("application/x-rag-source");
+    if (raw) {
+      e.preventDefault();
+      setDropTarget(null);
+      try {
+        const { sourceId, fromProfileId } = JSON.parse(raw);
+        await copySourceTo(sourceId, fromProfileId, targetPid);
+      } catch {
+        /* ignore malformed drag */
+      }
+      return;
+    }
+    await onDropFiles(e, targetPid);
+  }
+
   // ── Context menu ──
 
   function openMenu(e, payload) {
@@ -644,16 +680,20 @@ function App() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ query: text, topK: 4, mode })
       });
+      const cites = (payload.citations || []).map((c) => ({ ...c, query: text }));
+      const used = new Set([...String(payload.answer).matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
+      const panelCites = used.size ? cites.filter((c) => used.has(c.number)) : cites;
       setMessages((prev) => [
         ...prev,
         {
           id: payload.id || String(Date.now() + 1),
           role: "assistant",
           content: payload.answer,
-          citations: payload.citations || []
+          citations: cites,
+          panelCitations: panelCites
         }
       ]);
-      setActiveCitations(payload.citations || []);
+      setActiveCitations(panelCites);
       setStatus("답변 완료");
     } catch (err) {
       setMessages((prev) => [
@@ -709,6 +749,7 @@ function App() {
 
     const popup = window.open("", `source-${citation.sourceId}-${citation.number}`, "width=700,height=800,resizable=yes,scrollbars=yes");
     if (!popup) return;
+    const body = highlightTerms(escapeHtml(citation.text || citation.excerpt || ""), citation.query || "");
     const html = `<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <title>[${citation.number}] ${escapeHtml(citation.title)}</title>
 <style>
@@ -718,14 +759,16 @@ function App() {
   .header h1 { font-size: 1.05rem; font-weight: 700; line-height: 1.4; }
   .header .meta { margin-top: 5px; font-size: 0.82rem; opacity: 0.85; }
   .body { padding: 22px 24px; }
-  .score-row { display: flex; gap: 8px; margin-bottom: 14px; }
+  .score-row { display: flex; gap: 8px; margin-bottom: 14px; align-items: center; flex-wrap: wrap; }
   .score { background: #e5f3ef; color: #005e52; padding: 3px 10px; border-radius: 999px; font-size: 0.78rem; font-weight: 700; }
   .num { background: #dde8ff; color: #2946a8; padding: 3px 10px; border-radius: 999px; font-size: 0.78rem; font-weight: 700; }
+  .hl-note { color: #68736d; font-size: 0.76rem; }
   .excerpt { white-space: pre-wrap; line-height: 1.75; font-size: 0.93rem; background: white; border: 1px solid #d9e0dc; border-radius: 8px; padding: 18px; }
+  mark { background: #ffe08a; color: inherit; padding: 0 2px; border-radius: 2px; }
 </style></head><body>
 <div class="header"><h1>${escapeHtml(citation.title)}</h1>${locatorStr ? `<div class="meta">${escapeHtml(locatorStr)}</div>` : ""}</div>
-<div class="body"><div class="score-row"><span class="num">[${citation.number}]</span><span class="score">유사도 ${typeof citation.score === "number" ? citation.score.toFixed(3) : "-"}</span></div>
-<div class="excerpt">${escapeHtml(citation.excerpt || "")}</div></div>
+<div class="body"><div class="score-row"><span class="num">[${citation.number}]</span><span class="score">유사도 ${typeof citation.score === "number" ? citation.score.toFixed(3) : "-"}</span>${citation.query ? '<span class="hl-note">노란 표시 = 질문 키워드</span>' : ""}</div>
+<div class="excerpt">${body}</div></div>
 </body></html>`;
     popup.document.write(html);
     popup.document.close();
@@ -894,7 +937,13 @@ function App() {
           <div
             key={source.id}
             className={`tree-row file status-${source.status}`}
-            title={`${source.relative_path || source.title} · ${statusLabel(source.status)}`}
+            title={`${source.relative_path || source.title} · ${statusLabel(source.status)} · 드래그해서 다른 Agent로 복사`}
+            draggable
+            onDragStart={(e) => {
+              e.stopPropagation();
+              e.dataTransfer.setData("application/x-rag-source", JSON.stringify({ sourceId: source.id, fromProfileId: pid }));
+              e.dataTransfer.effectAllowed = "copy";
+            }}
             onContextMenu={(e) => openMenu(e, { kind: "source", pid, source })}
           >
             {source.kind === "url" ? <Link size={13} /> : <File size={13} />}
@@ -1164,7 +1213,7 @@ function App() {
                   onContextMenu={(e) => openMenu(e, { kind: "agent", pid: p.id })}
                   onDragOver={(e) => { e.preventDefault(); setDropTarget(p.id); }}
                   onDragLeave={() => setDropTarget((t) => (t === p.id ? null : t))}
-                  onDrop={(e) => onDropFiles(e, p.id)}
+                  onDrop={(e) => onAgentDrop(e, p.id)}
                 >
                   <button className="agent-toggle" type="button" onClick={(e) => { e.stopPropagation(); toggleExpand(p.id); }}>
                     {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
@@ -1488,6 +1537,22 @@ function escapeHtml(text) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+// Wrap query keywords (length >= 2) in <mark> within already-escaped text.
+function highlightTerms(escapedText, query) {
+  const terms = String(query || "")
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2)
+    .sort((a, b) => b.length - a.length);
+  if (!terms.length) return escapedText;
+  const pattern = terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  try {
+    return escapedText.replace(new RegExp(`(${pattern})`, "gi"), "<mark>$1</mark>");
+  } catch {
+    return escapedText;
+  }
 }
 
 async function fetchJson(url, options) {
