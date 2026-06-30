@@ -826,6 +826,11 @@ input:focus, select:focus, textarea:focus {
 
 .input-tools .tool:hover { background: var(--bg); color: var(--accent-dark); }
 
+.tool-sep { width: 1px; align-self: stretch; margin: 6px 4px; background: var(--line); }
+
+.input-tools .tool.toggle.on { color: #fff; background: var(--accent); }
+.input-tools .tool.toggle.on:hover { background: var(--accent-dark); }
+
 .composer .send-btn {
   width: 36px;
   height: 36px;
