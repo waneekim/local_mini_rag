@@ -627,6 +627,17 @@ input:focus, select:focus, textarea:focus {
 .mention-item.active { background: var(--bg); }
 .mention-item svg { color: var(--muted); }
 
+.sug-cmd { font-weight: 700; color: var(--accent-dark); flex-shrink: 0; }
+.sug-desc {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mention-pop { max-width: 360px; }
+
 .composer { position: relative; }
 
 .chat-bubble-row {
