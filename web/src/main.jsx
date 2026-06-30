@@ -61,6 +61,7 @@ function App() {
   const [agentFilter, setAgentFilter] = useState("");
   const [suggest, setSuggest] = useState(null); // { type:"mention"|"command", items, index }
   const [autoIndex, setAutoIndex] = useState(() => localStorage.getItem("rag.autoIndex") === "1");
+  const [editingMode, setEditingMode] = useState(null); // mode being edited/created in settings
 
   const [editingId, setEditingId] = useState("");
   const [editingName, setEditingName] = useState("");
@@ -864,12 +865,68 @@ function App() {
     loadPresetIntoForm(state, state.activePreset);
     setSkillRepo(skillCfg.repo || "");
     setAvailableSkills([]);
+    setEditingMode(null);
     loadSkills();
     setSettingsOpen(true);
   }
 
   async function loadSkills() {
     setSkills(await fetchJson("/api/skills").catch(() => []));
+  }
+
+  async function loadModes() {
+    const list = await fetchJson("/api/modes");
+    setModes(list);
+    if (!list.some((m) => m.key === chatMode)) setChatMode(list[0]?.key || "general");
+    return list;
+  }
+
+  function startEditMode(m) {
+    setEditingMode({
+      key: m.key,
+      label: m.label,
+      hint: m.hint || "",
+      aliases: (m.aliases || []).filter((a) => a !== m.label).join(", "),
+      system: m.system || ""
+    });
+  }
+
+  function startNewMode() {
+    if (modes.length >= 10) { window.alert("모드는 최대 10개까지 만들 수 있습니다."); return; }
+    setEditingMode({ key: "", label: "", hint: "", aliases: "", system: "" });
+  }
+
+  function setModeField(key, value) {
+    setEditingMode((m) => ({ ...m, [key]: value }));
+  }
+
+  async function saveMode() {
+    if (!editingMode.label.trim() || !editingMode.system.trim()) {
+      window.alert("이름과 지시문(시스템 프롬프트)을 입력하세요.");
+      return;
+    }
+    try {
+      await fetchJson("/api/modes", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(editingMode)
+      });
+      setEditingMode(null);
+      await loadModes();
+      setStatus("모드 저장됨");
+    } catch (e) {
+      window.alert(`모드 저장 오류: ${e.message}`);
+    }
+  }
+
+  async function deleteMode(key) {
+    if (!window.confirm("이 모드를 삭제할까요?")) return;
+    try {
+      await fetchJson(`/api/modes/${encodeURIComponent(key)}`, { method: "DELETE" });
+      await loadModes();
+    } catch (e) {
+      window.alert(`삭제 오류: ${e.message}`);
+    }
   }
 
   async function syncSkills() {
@@ -1179,6 +1236,33 @@ function App() {
                 </label>
                 <label>API Key <span className="optional">(선택)</span><input type="password" value={settingsForm.embedding.apiKey || ""} onChange={(e) => setEmbField("apiKey", e.target.value)} placeholder="없으면 비워두세요" /></label>
               </div>
+            </div>
+
+            <div className="settings-section">
+              <h3>대화 모드 <span className="optional">({modes.length}/10 · 프롬프트 위 칩)</span></h3>
+              {!editingMode ? (
+                <>
+                  {modes.map((m) => (
+                    <div key={m.key} className="skill-row">
+                      <div className="skill-meta"><strong>{m.label}</strong><span>{m.hint}</span></div>
+                      <button className="mini" type="button" title="편집" onClick={() => startEditMode(m)}><Pencil size={13} /></button>
+                      <button className="mini danger" type="button" title="삭제" onClick={() => deleteMode(m.key)} disabled={modes.length <= 1}><Trash2 size={13} /></button>
+                    </div>
+                  ))}
+                  <button type="button" className="secondary mini-btn" style={{ marginTop: 10 }} onClick={startNewMode} disabled={modes.length >= 10}>+ 모드 추가</button>
+                </>
+              ) : (
+                <div className="settings-grid">
+                  <label>이름<input value={editingMode.label} onChange={(e) => setModeField("label", e.target.value)} placeholder="예: 요약" /></label>
+                  <label>설명(힌트)<input value={editingMode.hint} onChange={(e) => setModeField("hint", e.target.value)} placeholder="이 모드가 하는 일" /></label>
+                  <label>별칭 <span className="optional">(쉼표로 구분, 선택)</span><input value={editingMode.aliases} onChange={(e) => setModeField("aliases", e.target.value)} placeholder="summary, 요약" /></label>
+                  <label>지시문 (시스템 프롬프트)<textarea value={editingMode.system} onChange={(e) => setModeField("system", e.target.value)} style={{ minHeight: 130 }} placeholder="이 모드에서 LLM이 따를 지시. 답변은 한국어로 등." /></label>
+                  <div className="mode-edit-actions">
+                    <button type="button" className="secondary" onClick={() => setEditingMode(null)}>취소</button>
+                    <button type="button" onClick={saveMode} disabled={!editingMode.label.trim() || !editingMode.system.trim()}>저장</button>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="settings-section">
