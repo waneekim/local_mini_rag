@@ -147,11 +147,24 @@ function App() {
   useEffect(() => {
     function onClick() { setMenu(null); }
     function onKey(e) { if (e.key === "Escape") { setMenu(null); setTextDialog(null); setUrlDialog(null); setCrop(null); setDragRect(null); } }
+    // Paste a screenshot image anywhere in the app → extract text (native ⌃⌘⇧4 → ⌘V).
+    function onPaste(e) {
+      const item = [...(e.clipboardData?.items || [])].find((it) => it.type.startsWith("image/"));
+      if (!item) return;
+      e.preventDefault();
+      const file = item.getAsFile();
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => extractFromImage(reader.result);
+      reader.readAsDataURL(file);
+    }
     window.addEventListener("click", onClick);
     window.addEventListener("keydown", onKey);
+    window.addEventListener("paste", onPaste);
     return () => {
       window.removeEventListener("click", onClick);
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("paste", onPaste);
     };
   }, []);
 
@@ -445,16 +458,6 @@ function App() {
     await extractFromImage(c.toDataURL("image/png"));
   }
 
-  function onComposerPaste(e) {
-    const item = [...(e.clipboardData?.items || [])].find((it) => it.type.startsWith("image/"));
-    if (!item) return;
-    e.preventDefault();
-    const file = item.getAsFile();
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => extractFromImage(reader.result);
-    reader.readAsDataURL(file);
-  }
 
   function toggleAutoIndex(value) {
     const next = typeof value === "boolean" ? value : !autoIndex;
@@ -1674,7 +1677,6 @@ function App() {
                     value={query}
                     onChange={onQueryChange}
                     onKeyDown={handleKeyDown}
-                    onPaste={onComposerPaste}
                     onScroll={(e) => { if (highlightRef.current) highlightRef.current.scrollTop = e.currentTarget.scrollTop; }}
                     placeholder={
                       activeMode && chatMode !== "general"
@@ -1691,7 +1693,7 @@ function App() {
                     <button className="tool" type="button" title="폴더 추가" onClick={() => pickFolder(activeProfileId)}><FolderUp size={16} /></button>
                     <button className="tool" type="button" title="텍스트 추가" onClick={() => openTextDialog(activeProfileId)}><FileText size={16} /></button>
                     <button className="tool" type="button" title="URL 추가" onClick={() => openUrlDialog(activeProfileId)}><Link size={16} /></button>
-                    <button className="tool" type="button" title="스크린샷 검증 (영역 선택 → 텍스트 추출)" onClick={captureScreenshot}><Camera size={16} /></button>
+                    <button className="tool" type="button" title="스크린샷 검증 · 클릭=화면 공유 후 영역선택 / 또는 ⌃⌘⇧4로 캡처 후 ⌘V 붙여넣기" onClick={captureScreenshot}><Camera size={16} /></button>
                     <span className="tool-sep" />
                     <button
                       className={`tool toggle ${autoIndex ? "on" : ""}`}
