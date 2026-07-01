@@ -623,8 +623,10 @@ input:focus, select:focus, textarea:focus {
   font-size: 0.87rem;
 }
 
-.mention-item:hover,
-.mention-item.active { background: var(--bg); }
+.mention-item:hover { background: var(--bg); }
+.mention-item.active { background: #e0efea; color: var(--accent-dark); }
+.mention-item.active .sug-cmd,
+.mention-item.active svg { color: var(--accent-dark); }
 .mention-item svg { color: var(--muted); }
 
 .sug-cmd { font-weight: 700; color: var(--accent-dark); flex-shrink: 0; }

@@ -1534,6 +1534,7 @@ function App() {
                         key={suggest.type === "mention" ? item.id : item.cmd}
                         type="button"
                         className={`mention-item ${i === suggest.index ? "active" : ""}`}
+                        onMouseEnter={() => setSuggest((s) => (s ? { ...s, index: i } : s))}
                         onMouseDown={(e) => { e.preventDefault(); pickSuggest(item); }}
                       >
                         {suggest.type === "mention" ? (
