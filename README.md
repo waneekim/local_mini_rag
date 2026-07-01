@@ -255,15 +255,20 @@ ARK_ADMIN_TOKEN=원하는암호 npm start   # http://0.0.0.0:8787 (같은 포트
 
 ## 환경 변수 (`.env`, 선택)
 
-프리셋(`data/settings.json`)이 우선이며, 없을 때 `.env` 기본값이 쓰입니다.
+프리셋(`data/settings.json`)이 우선이며, 없을 때 `.env` 기본값이 쓰입니다. 여기 값들은
+⚙️ 연결 설정의 **"기본" 프리셋으로 자동 등록**됩니다. 회사 서버 설정은 **`.env.example`에
+바로 쓸 수 있게 준비**되어 있으니 `cp .env.example .env` 후 사용하세요(API Key는 커밋되지
+않도록 브라우저에서 입력).
 
 ```env
 LLM_BASE_URL=http://localhost:1234/v1
 LLM_MODEL=qwen2.5-7b-instruct
+VISION_MODEL=            # 비전(스크린샷) 분석용 모델 id · LLM이 비전 겸용이면 LLM_MODEL과 동일
 LLM_MAX_TOKENS=1024
 EMBEDDINGS_URL=http://localhost:1234/v1/embeddings
 EMBEDDINGS_MODEL=text-embedding-bge-m3
 RAG_EMBEDDING_DIMENSIONS=1024
+# API Key는 .env에 두지 말고 브라우저 ⚙️ 연결 설정에서 입력 권장 (LLM_API_KEY / EMBEDDINGS_API_KEY)
 # 중앙 공유 서버로 쓸 때: 설정하면 읽기는 공개, 모든 수정은 이 암호 필요 (개인 로컬이면 비워둠)
 # ARK_ADMIN_TOKEN=원하는암호
 # HOST, PORT (기본 0.0.0.0:8787), CORS_ORIGIN
