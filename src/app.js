@@ -185,15 +185,23 @@ export async function createApp(options = {}) {
   });
 
   // Stable surface for external tools (Figma plugin): validate text against a
-  // profile's guidelines. Defaults to compliance (규율) mode.
+  // profile's guidelines. Defaults to the Figma-oriented 규율 mode.
   app.post("/api/validate", async (request, reply) => {
     const body = request.body || {};
     if (!body.profileId) return reply.code(400).send({ error: "profileId is required" });
     return rag.chat(body.profileId, {
       query: String(body.text || ""),
-      mode: body.mode || "compliance",
+      mode: body.mode || "figmaAudit",
       topK: body.topK
     });
+  });
+
+  // Batch audit surface for a Figma plugin or export script. Send selected text
+  // nodes and optional design metadata; the response is a normal cited RAG chat.
+  app.post("/api/figma/audit", async (request, reply) => {
+    const body = request.body || {};
+    if (!body.profileId) return reply.code(400).send({ error: "profileId is required" });
+    return rag.figmaAudit(body.profileId, body);
   });
 
   // Extract text from an image (screenshot crop) via the configured vision LLM.

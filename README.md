@@ -95,7 +95,7 @@ npm run py:deps      # PDF/Word/Excel/PPT 추출용 Python 워커 의존성 (.ve
 |------|------|
 | **일반** | 자유 대화, 관련 문서가 있으면 근거로 활용 |
 | **검색** | 문서에서만 찾아 근거 인용 |
-| **규율** | 입력한 UX 문구가 가이드 규격에 맞는지 검수 → ✅/⚠️ + 규칙 인용 + 수정안 |
+| **규율** | Figma 화면의 문구·용어가 규격에 맞는지 확인하고 올바른 단어와 문장 추천 |
 | **추천** | 가이드에 근거해 적절한 UI/UX 패턴·문구 추천 |
 | **분석** | 요약·강점·문제점·개선제안으로 구조화 분석 |
 
@@ -118,13 +118,44 @@ npm run py:deps      # PDF/Word/Excel/PPT 추출용 Python 워커 의존성 (.ve
 
 ## 6. 참조 문서 (인용)
 
-- 채팅 우측 **참조 문서** 패널은 답변이 실제로 인용한 `[n]`만 표시합니다(없으면 검색된 문서 표시).
-- 답변 속 `[1]` 또는 패널 항목을 클릭하면 **새 팝업 창**으로 원문이 열리고, **질문 키워드가
-  노란색으로 하이라이트**됩니다. 팝업은 브라우저 밖으로 빼서 나란히 볼 수 있습니다.
+- 채팅 우측 **참조 문서** 패널은 답변이 실제로 인용한 문서를 묶어서 `문서제목(찾은 텍스트 수)`로 표시합니다.
+- 답변 속 `[1]` 또는 패널 항목을 클릭하면 **새 팝업 창**으로 해당 문서에서 찾은 텍스트들이 열리고,
+  **질문어/검색어가 노란색으로 하이라이트**됩니다. 팝업은 브라우저 밖으로 빼서 나란히 볼 수 있습니다.
 
 ---
 
-## 7. 스킬 (답변 후처리)
+## 7. Figma 텍스트 검수 API
+
+Figma 플러그인이나 export script에서 선택한 노드들을 서버로 보내면, 현재 Agent의 가이드 문서를
+RAG 근거로 삼아 항목별 검수와 추천 문구를 반환합니다.
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/figma/audit \
+  -H 'content-type: application/json' \
+  -d '{
+    "profileId": "profile_xxx",
+    "focus": "버튼 CTA와 에러 메시지 문구",
+    "items": [
+      {
+        "nodeId": "12:34",
+        "name": "Primary CTA",
+        "type": "TEXT",
+        "page": "Onboarding",
+        "frame": "Welcome",
+        "component": "Button/Primary",
+        "text": "확인",
+        "fontSize": 16
+      }
+    ]
+  }'
+```
+
+응답은 일반 채팅 응답과 같아서 `answer`, `citations`, `provider`를 포함하고, 추가로 `figma.items`에
+서버가 정규화한 노드 목록이 들어갑니다. 한 번에 최대 80개 노드까지 검수 프롬프트에 포함합니다.
+
+---
+
+## 8. 스킬 (답변 후처리)
 
 ⚠️ 스킬은 **다운로드한 실행 코드(Python/JS)를 서브프로세스로 실행**합니다. 신뢰된 사내 저장소 1개만 쓰세요.
 
@@ -138,7 +169,7 @@ npm run py:deps      # PDF/Word/Excel/PPT 추출용 Python 워커 의존성 (.ve
 
 ---
 
-## 8. 슬래시 명령 / 자동완성
+## 9. 슬래시 명령 / 자동완성
 
 입력창에 `/`를 치면 **추천 명령 목록**이 위로 뜹니다(↑/↓ 이동, Enter/Tab 선택). `@`는 Agent 자동완성.
 
@@ -156,7 +187,7 @@ npm run py:deps      # PDF/Word/Excel/PPT 추출용 Python 워커 의존성 (.ve
 
 ---
 
-## 9. 화면 구성
+## 10. 화면 구성
 
 - 좌: Agent 목록(+검색) / 중앙: 채팅(상단 답변, 하단 입력) / 우: 참조 문서
 - 패널 사이 경계와 입력창 위를 드래그하면 너비/높이를 조절할 수 있고, 값은 브라우저에 저장됩니다.
@@ -187,6 +218,7 @@ npm run py:deps      # PDF/Word/Excel/PPT 추출용 Python 워커 의존성 (.ve
 
 대화·검색
 - `POST /api/profiles/:id/search` · `/context` · `/chat`  (`chat` 본문에 `mode` 지정)
+- `POST /api/validate` · `POST /api/figma/audit`  (외부 도구/Figma 플러그인용 검수)
 
 설정·모드·스킬
 - `GET/PUT /api/settings` · `POST /api/settings/select` · `DELETE /api/settings/:name`

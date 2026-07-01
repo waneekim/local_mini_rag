@@ -749,15 +749,23 @@ input:focus, select:focus, textarea:focus {
   background: var(--surface);
 }
 
+.mode-picker {
+  margin-bottom: 9px;
+}
+
 .mode-bar {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 9px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
 }
 
 .mode-chip {
+  flex: 0 0 auto;
   min-height: 28px;
   height: 28px;
   padding: 0 12px;
@@ -778,13 +786,13 @@ input:focus, select:focus, textarea:focus {
 }
 
 .mode-hint {
-  margin-left: 4px;
+  min-height: 17px;
+  margin: 5px 2px 0;
   font-size: 0.78rem;
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
 }
 
 .bubble-mode {
@@ -952,7 +960,7 @@ input:focus, select:focus, textarea:focus {
   width: 100%;
   min-height: unset;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
   padding: 8px 14px;
   border-radius: 0;
@@ -983,6 +991,13 @@ input:focus, select:focus, textarea:focus {
   flex: 1;
   overflow-wrap: anywhere;
   line-height: 1.4;
+  font-weight: 650;
+}
+
+.citation-count {
+  margin-left: 4px;
+  color: var(--accent);
+  font-weight: 800;
 }
 
 .citation-loc {

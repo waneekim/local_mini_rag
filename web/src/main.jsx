@@ -25,6 +25,7 @@ import {
   X,
   Zap
 } from "lucide-react";
+import { buildCitationGroups, buildCitationPopupHtml } from "./citations.js";
 import "./styles.css";
 
 const API = "";
@@ -132,6 +133,7 @@ function App() {
   }, [modes]);
 
   const activeMode = useMemo(() => modes.find((m) => m.key === chatMode) || null, [modes, chatMode]);
+  const activeCitationGroups = useMemo(() => buildCitationGroups(activeCitations), [activeCitations]);
 
   const commandList = useMemo(() => {
     const modeCmds = modes.map((m) => ({ cmd: m.label, desc: `모드 · ${m.hint}` }));
@@ -979,37 +981,10 @@ function App() {
   }
 
   function openCitationPopup(citation) {
-    const locatorParts = [];
-    if (citation.locator?.relativePath) locatorParts.push(citation.locator.relativePath);
-    if (citation.locator?.page) locatorParts.push(`페이지 ${citation.locator.page}`);
-    if (citation.locator?.slide) locatorParts.push(`슬라이드 ${citation.locator.slide}`);
-    if (citation.locator?.sheet) locatorParts.push(`시트 ${citation.locator.sheet}`);
-    const locatorStr = locatorParts.join(" · ");
-
-    const popup = window.open("", `source-${citation.sourceId}-${citation.number}`, "width=700,height=800,resizable=yes,scrollbars=yes");
+    const popupName = citation?.sourceId || citation?.id || `citation-${citation?.number || "source"}`;
+    const popup = window.open("", `source-${popupName}`, "width=760,height=820,resizable=yes,scrollbars=yes");
     if (!popup) return;
-    const body = highlightTerms(escapeHtml(citation.text || citation.excerpt || ""), citation.query || "");
-    const html = `<!doctype html><html lang="ko"><head><meta charset="utf-8">
-<title>[${citation.number}] ${escapeHtml(citation.title)}</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: system-ui, -apple-system, sans-serif; color: #17211d; background: #f4f6f3; }
-  .header { background: #007a68; color: white; padding: 20px 24px; }
-  .header h1 { font-size: 1.05rem; font-weight: 700; line-height: 1.4; }
-  .header .meta { margin-top: 5px; font-size: 0.82rem; opacity: 0.85; }
-  .body { padding: 22px 24px; }
-  .score-row { display: flex; gap: 8px; margin-bottom: 14px; align-items: center; flex-wrap: wrap; }
-  .score { background: #e5f3ef; color: #005e52; padding: 3px 10px; border-radius: 999px; font-size: 0.78rem; font-weight: 700; }
-  .num { background: #dde8ff; color: #2946a8; padding: 3px 10px; border-radius: 999px; font-size: 0.78rem; font-weight: 700; }
-  .hl-note { color: #68736d; font-size: 0.76rem; }
-  .excerpt { white-space: pre-wrap; line-height: 1.75; font-size: 0.93rem; background: white; border: 1px solid #d9e0dc; border-radius: 8px; padding: 18px; }
-  mark { background: #ffe08a; color: inherit; padding: 0 2px; border-radius: 2px; }
-</style></head><body>
-<div class="header"><h1>${escapeHtml(citation.title)}</h1>${locatorStr ? `<div class="meta">${escapeHtml(locatorStr)}</div>` : ""}</div>
-<div class="body"><div class="score-row"><span class="num">[${citation.number}]</span><span class="score">유사도 ${typeof citation.score === "number" ? citation.score.toFixed(3) : "-"}</span>${citation.query ? '<span class="hl-note">노란 표시 = 질문 키워드</span>' : ""}</div>
-<div class="excerpt">${body}</div></div>
-</body></html>`;
-    popup.document.write(html);
+    popup.document.write(buildCitationPopupHtml(citation, activeCitations));
     popup.document.close();
   }
 
@@ -1697,21 +1672,23 @@ function App() {
 
             <div className="chat-input-bar">
               {modes.length > 0 && (
-                <div className="mode-bar" role="tablist" aria-label="모드">
-                  {modes.map((mo) => (
-                    <button
-                      key={mo.key}
-                      type="button"
-                      role="tab"
-                      aria-selected={mo.key === chatMode}
-                      className={`mode-chip ${mo.key === chatMode ? "active" : ""}`}
-                      title={mo.hint}
-                      onClick={() => setChatMode(mo.key)}
-                    >
-                      {mo.label}
-                    </button>
-                  ))}
-                  {activeMode && <span className="mode-hint">{activeMode.hint}</span>}
+                <div className="mode-picker">
+                  <div className="mode-bar" role="tablist" aria-label="모드">
+                    {modes.map((mo) => (
+                      <button
+                        key={mo.key}
+                        type="button"
+                        role="tab"
+                        aria-selected={mo.key === chatMode}
+                        className={`mode-chip ${mo.key === chatMode ? "active" : ""}`}
+                        title={mo.hint}
+                        onClick={() => setChatMode(mo.key)}
+                      >
+                        {mo.label}
+                      </button>
+                    ))}
+                  </div>
+                  {activeMode && <p className="mode-hint">{activeMode.hint}</p>}
                 </div>
               )}
               <div className="composer">
@@ -1787,14 +1764,16 @@ function App() {
 
           <aside className="citations-panel">
             <div className="citations-header"><Search size={14} />참조 문서</div>
-            {activeCitations.length > 0 ? (
+            {activeCitationGroups.length > 0 ? (
               <ul className="citations-list">
-                {activeCitations.map((c) => (
-                  <li key={c.number}>
-                    <button className="citation-link" type="button" onClick={() => openCitationPopup(c)}>
-                      <span className="citation-num">[{c.number}]</span>
-                      <span className="citation-title">{c.title}</span>
-                      {c.locator?.page && <span className="citation-loc">p.{c.locator.page}</span>}
+                {activeCitationGroups.map((group) => (
+                  <li key={group.id}>
+                    <button className="citation-link" type="button" onClick={() => openCitationPopup(group)}>
+                      <span className="citation-title">
+                        {group.title}
+                        <span className="citation-count">({group.count})</span>
+                      </span>
+                      {group.maxScore !== null && <span className="citation-loc">{group.maxScore.toFixed(2)}</span>}
                     </button>
                   </li>
                 ))}
@@ -1898,14 +1877,6 @@ function renderAnswerText(text, citations, onCitationClick) {
   });
 }
 
-function escapeHtml(text) {
-  return String(text || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
 // Downscale large screenshots before sending to the vision model — big images
 // blow up the vision-token count and time out. Longest side capped, JPEG output.
 async function downscaleImage(dataUrl, maxDim = 1400) {
@@ -1954,22 +1925,6 @@ function renderInputHighlight(text, profiles) {
     nodes.push(rest);
   }
   return nodes;
-}
-
-// Wrap query keywords (length >= 2) in <mark> within already-escaped text.
-function highlightTerms(escapedText, query) {
-  const terms = String(query || "")
-    .split(/\s+/)
-    .map((t) => t.trim())
-    .filter((t) => t.length >= 2)
-    .sort((a, b) => b.length - a.length);
-  if (!terms.length) return escapedText;
-  const pattern = terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-  try {
-    return escapedText.replace(new RegExp(`(${pattern})`, "gi"), "<mark>$1</mark>");
-  } catch {
-    return escapedText;
-  }
 }
 
 async function fetchJson(url, options) {

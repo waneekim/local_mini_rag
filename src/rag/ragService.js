@@ -8,12 +8,19 @@ import { hashFile, hashText } from "./hash.js";
 import { id, nowIso } from "./ids.js";
 import { CHAT_MODES, LlmProvider } from "./llmProvider.js";
 import { extractTextFromImage } from "./vision.js";
+import {
+  addExactCandidatesToQuery,
+  buildFigmaAuditPrompt,
+  extractFigmaTextCandidates,
+  repairFigmaAuditAnswer
+} from "./figmaAudit.js";
 import { basenameFromRelative, normalizeUploadedFileName, sanitizeFileName } from "./sanitize.js";
 import { chunkDocuments } from "./chunking.js";
 import { cosineSimilarity, lexicalScore } from "./vectorMath.js";
 import { WorkerClient } from "./workerClient.js";
 
 const DEFAULT_TOP_K = 8;
+const MAX_FIGMA_SUPPLEMENTAL_CITATIONS = 4;
 
 export function createRagService(options) {
   return new RagService(options);
@@ -590,18 +597,32 @@ class RagService {
   async chat(profileId, input) {
     const query = String(input.query || "").trim();
     if (!query) throw Object.assign(new Error("Query is required"), { statusCode: 400 });
-    const envelope = await this.buildContext(profileId, input);
+    let envelope = await this.buildContext(profileId, input);
     const mode =
       this.modeStore?.get(input.mode) ||
       this.modeStore?.get("general") ||
       this.modeStore?.list()[0] ||
       CHAT_MODES[CHAT_MODES[input.mode] ? input.mode : "general"];
+    const isFigmaAudit = isFigmaAuditMode(input.mode, mode);
+    const reviewTexts = input.figmaAudit?.reviewTexts?.length ? input.figmaAudit.reviewTexts : [query];
+    if (isFigmaAudit) {
+      envelope = this.extendFigmaCandidateContext(profileId, envelope, reviewTexts);
+    }
+    const figmaCandidates = isFigmaAudit
+      ? extractFigmaTextCandidates(reviewTexts, envelope.citations)
+      : { exactCandidates: [], suggestionCandidates: [] };
+    const { exactCandidates, suggestionCandidates } = figmaCandidates;
+    const effectiveQuery = isFigmaAudit ? addExactCandidatesToQuery(query, exactCandidates, suggestionCandidates) : query;
     const result = await this.llm.generate({
-      query,
+      query: effectiveQuery,
       messages: input.messages || [],
       envelope,
-      system: mode?.system
+      system: mode?.system,
+      temperature: isFigmaAudit ? 0 : 0.2
     });
+    const repair = isFigmaAudit
+      ? repairFigmaAuditAnswer(result.answer, exactCandidates, suggestionCandidates)
+      : { answer: result.answer, repaired: false };
     const at = nowIso();
     const runId = id("chat");
     run(
@@ -611,7 +632,7 @@ class RagService {
       runId,
       profileId,
       query,
-      result.answer,
+      repair.answer,
       JSON.stringify(envelope.citations),
       JSON.stringify(result.provider),
       at
@@ -620,11 +641,75 @@ class RagService {
       id: runId,
       profileId,
       query,
-      answer: result.answer,
+      answer: repair.answer,
       citations: envelope.citations,
       provider: result.provider,
+      ...(isFigmaAudit
+        ? {
+            figmaGrounding: {
+              exactCandidates,
+              suggestionCandidates,
+              repaired: repair.repaired
+            }
+          }
+        : {}),
       sourceVersion: envelope.sourceVersion,
       created_at: at
+    };
+  }
+
+  async figmaAudit(profileId, input = {}) {
+    const audit = buildFigmaAuditPrompt(input);
+    const result = await this.chat(profileId, {
+      ...input,
+      query: audit.query,
+      mode: input.mode || "figmaAudit",
+      topK: input.topK || 10,
+      figmaAudit: audit
+    });
+    return {
+      ...result,
+      figma: {
+        items: audit.items,
+        focus: audit.focus,
+        truncated: audit.truncated
+      }
+    };
+  }
+
+  extendFigmaCandidateContext(profileId, envelope, reviewTexts) {
+    const existing = new Set((envelope.citations || []).map((citation) => citation.chunkId));
+    const chunks = all(
+      this.db,
+      `SELECT chunks.*, sources.title, sources.file_name, sources.relative_path, sources.kind
+       FROM chunks
+       JOIN sources ON sources.id = chunks.source_id
+       WHERE chunks.profile_id = ?`,
+      profileId
+    );
+    const supplemental = [];
+    for (const chunk of chunks) {
+      if (existing.has(chunk.id)) continue;
+      const citation = citationFromChunk(chunk, 1);
+      const candidates = extractFigmaTextCandidates(reviewTexts, [citation]);
+      const best = candidates.exactCandidates[0] || candidates.suggestionCandidates[0];
+      if (!best) continue;
+      supplemental.push({ citation, confidence: best.confidence || 0 });
+    }
+    if (!supplemental.length) return envelope;
+
+    const extraCitations = supplemental
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, MAX_FIGMA_SUPPLEMENTAL_CITATIONS)
+      .map((entry) => entry.citation);
+    const citations = [...envelope.citations, ...extraCitations].map((citation, index) => ({
+      ...citation,
+      number: index + 1
+    }));
+    return {
+      ...envelope,
+      citations,
+      contextText: contextTextFromCitations(citations)
     };
   }
 }
@@ -774,6 +859,28 @@ function excerpt(text) {
   return String(text || "").replace(/\s+/g, " ").trim().slice(0, 260);
 }
 
+function citationFromChunk(chunk, number) {
+  return {
+    number,
+    chunkId: chunk.id,
+    sourceId: chunk.source_id,
+    title: chunk.title,
+    locator: safeJson(chunk.locator_json),
+    score: 0,
+    excerpt: excerpt(chunk.text),
+    text: chunk.text
+  };
+}
+
+function contextTextFromCitations(citations) {
+  return (citations || [])
+    .map((citation) => {
+      const locator = formatLocator(citation.locator || {});
+      return `[${citation.number}] ${citation.title}${locator ? ` (${locator})` : ""}\n${citation.text}`;
+    })
+    .join("\n\n");
+}
+
 function formatLocator(locator) {
   const parts = [];
   if (locator.relativePath) parts.push(locator.relativePath);
@@ -791,6 +898,15 @@ function sourceVersion(db, profileId) {
     profileId
   );
   return `${row.count}:${row.indexedAt}`;
+}
+
+function isFigmaAuditMode(inputMode, mode) {
+  const key = String(inputMode || mode?.key || "").toLowerCase();
+  if (key === "figmaaudit" || key === "figma-audit" || key === "figma" || key === "피그마" || key === "규율") return true;
+  return (mode?.aliases || []).some((alias) => {
+    const value = String(alias || "").toLowerCase();
+    return value === "figmaaudit" || value === "figma-audit" || value === "figma" || value === "피그마" || value === "규율";
+  });
 }
 
 function nonEmpty(value, fallback) {

@@ -21,18 +21,6 @@ export const CHAT_MODES = {
       "If the context is insufficient, say so plainly instead of guessing. " +
       LANG_NOTE
   },
-  compliance: {
-    label: "규율",
-    aliases: ["규율", "규격", "검수", "compliance", "check"],
-    hint: "입력한 UX 문구·UI가 가이드 규격에 맞는지 검수하고 위반 항목을 짚어줍니다.",
-    system:
-      "You are a UX writing and UI compliance reviewer. The user gives you UX copy or a UI description to check. " +
-      "Compare it against the guideline rules found in the provided context. " +
-      "Respond as a checklist: for each point output '✅ 준수' or '⚠️ 위반', quote the exact rule and cite it with [n], " +
-      "then briefly explain the gap and suggest a compliant rewrite. " +
-      "If a relevant rule is not present in the context, state that explicitly rather than inventing one. " +
-      LANG_NOTE
-  },
   recommend: {
     label: "추천",
     aliases: ["추천", "가이드", "recommend", "guide"],
@@ -42,6 +30,24 @@ export const CHAT_MODES = {
       "UI pattern, component, or copy for the user's situation. Give concrete, actionable recommendations with a short rationale, " +
       "and cite the supporting guideline with [n]. Offer 1-3 options when reasonable. " +
       "If the guidelines do not cover it, say so. " +
+      LANG_NOTE
+  },
+  figmaAudit: {
+    label: "규율",
+    aliases: ["규율", "규격", "검수", "피그마", "figma", "figma-audit", "figmaAudit", "화면검수", "문구검수", "용어검수"],
+    hint: "Figma 화면의 문구·용어가 규격에 맞는지 확인하고 올바른 단어와 문장을 추천합니다.",
+    system:
+      "You are a Figma UX writing and product-language reviewer. The user provides selected Figma nodes, visible text, " +
+      "and optional design metadata. Check whether each word or sentence follows the terminology and writing rules in " +
+      "the provided local RAG context. Use ONLY the provided context as rule evidence. " +
+      "For a single input sentence, answer in this exact concise Korean format:\n" +
+      "올바른 문장: <corrected full sentence>\n" +
+      "근거: <why the original should change, citing the relevant guideline with [n]>\n" +
+      "추천 표현:\n- <candidate sentence> [n] · 유사도 <NN%> · <brief reason>\n" +
+      "For multiple Figma text items, repeat the same fields under '항목: <node name or text>'. " +
+      "Always rewrite the whole sentence, not only the changed word. If the original is already compliant, write " +
+      "the original full sentence and cite the supporting rule if available. If no relevant guideline exists, say " +
+      "'근거: 관련 규칙 없음' and do not invent a rule. Always include 추천 표현, even when there is no good candidate. " +
       LANG_NOTE
   },
   analyze: {
@@ -75,7 +81,7 @@ export class LlmProvider {
     };
   }
 
-  async generate({ query, messages = [], envelope, system }) {
+  async generate({ query, messages = [], envelope, system, temperature = 0.2 }) {
     if (this.provider === "mock") return this.mockGenerate({ query, envelope });
     if (this.provider !== "openai-compatible") throw new Error(`Unsupported LLM provider: ${this.provider}`);
     if (!this.baseUrl || !this.model) {
@@ -90,7 +96,7 @@ export class LlmProvider {
       },
       body: JSON.stringify({
         model: this.model,
-        temperature: 0.2,
+        temperature,
         ...(this.maxTokens > 0 ? { max_tokens: this.maxTokens } : {}),
         messages: [
           {

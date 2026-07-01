@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { CHAT_MODES } from "./llmProvider.js";
 
 export const MAX_MODES = 10;
+const RETIRED_DEFAULT_KEYS = new Set(["compliance"]);
 
 export class ModeStore {
   constructor(dataDir) {
@@ -25,7 +26,9 @@ export class ModeStore {
     try {
       const arr = JSON.parse(readFileSync(this.path, "utf8"));
       const cleaned = Array.isArray(arr) ? arr.map(normalizeMode).filter(Boolean) : [];
-      return cleaned.length ? cleaned : this._defaults();
+      const defaults = this._defaults();
+      const migrated = migrateModes(cleaned, defaults);
+      return migrated.length ? mergeMissingDefaults(migrated, defaults) : defaults;
     } catch {
       return this._defaults();
     }
@@ -40,7 +43,19 @@ export class ModeStore {
   }
 
   get(key) {
-    return this._modes.find((m) => m.key === key) || null;
+    const modeKey = String(key || "");
+    const lookup = modeKey.toLowerCase();
+    const saved = this._modes.find((m) => m.key === modeKey || (m.aliases || []).some((alias) => String(alias).toLowerCase() === lookup));
+    if (saved) return saved;
+    const fallback = CHAT_MODES[modeKey];
+    if (!fallback) return null;
+    return {
+      key: modeKey,
+      label: fallback.label,
+      aliases: fallback.aliases,
+      hint: fallback.hint,
+      system: fallback.system
+    };
   }
 
   upsert(input) {
@@ -80,6 +95,52 @@ function normalizeMode(input) {
   if (!Array.isArray(aliases)) aliases = [];
   if (!aliases.includes(label)) aliases = [label, ...aliases];
   return { key, label, aliases, hint: String(input.hint || "").trim(), system };
+}
+
+function mergeMissingDefaults(saved, defaults) {
+  const keys = new Set(saved.map((mode) => mode.key));
+  const aliases = new Set(saved.flatMap((mode) => mode.aliases || []).map((alias) => String(alias).toLowerCase()));
+  const merged = [...saved];
+  for (const mode of defaults) {
+    if (keys.has(mode.key)) continue;
+    if ((mode.aliases || []).some((alias) => aliases.has(String(alias).toLowerCase()))) continue;
+    merged.push(mode);
+    keys.add(mode.key);
+    for (const alias of mode.aliases || []) aliases.add(String(alias).toLowerCase());
+  }
+  return merged;
+}
+
+function migrateModes(saved, defaults) {
+  const figmaDefault = defaults.find((mode) => mode.key === "figmaAudit");
+  return saved
+    .filter((mode) => {
+      if (RETIRED_DEFAULT_KEYS.has(mode.key)) return false;
+      if (mode.key !== "figmaAudit" && mode.label === "규율") return false;
+      return true;
+    })
+    .map((mode) => {
+      if (mode.key !== "figmaAudit" || !figmaDefault) return mode;
+      return {
+        ...mode,
+        label: figmaDefault.label,
+        aliases: uniqueAliases([...(figmaDefault.aliases || []), ...(mode.aliases || [])]),
+        hint: mode.hint || figmaDefault.hint
+      };
+    });
+}
+
+function uniqueAliases(aliases) {
+  const seen = new Set();
+  const out = [];
+  for (const alias of aliases) {
+    const value = String(alias || "").trim();
+    const key = value.toLowerCase();
+    if (!value || seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
 }
 
 function slug(label) {
