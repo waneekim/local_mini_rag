@@ -159,6 +159,19 @@ function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  // Keep the shown model name current (e.g. after a preset/model change) on refocus.
+  useEffect(() => {
+    function refresh() {
+      if (!document.hidden) fetchJson("/v1/health").then(setHealth).catch(() => {});
+    }
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, []);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -1487,9 +1500,10 @@ function App() {
       <aside className="sidebar">
         <div className="brand">
           <Database size={21} aria-hidden="true" />
-          <div>
+          <div className="brand-text">
             <h1 title="Agent RAG Knowledge">ARK</h1>
-            <p>{health?.llmProvider?.model || health?.llmProvider?.provider || "checking"}</p>
+            <p className="brand-full">Agent RAG Knowledge</p>
+            <p className="brand-model">{health?.llmProvider?.model || health?.llmProvider?.provider || "checking"}</p>
           </div>
           <button className="icon-button" type="button" title="설정" onClick={openSettings} style={{ marginLeft: "auto" }}>
             <Settings size={18} />
