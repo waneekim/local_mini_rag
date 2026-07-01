@@ -41,7 +41,7 @@ export async function extractTextFromImage(image, { llm } = {}) {
         }
       ]
     }),
-    signal: AbortSignal.timeout(Number(process.env.VISION_TIMEOUT_MS || 60_000))
+    signal: AbortSignal.timeout(Number(process.env.VISION_TIMEOUT_MS || 120_000))
   });
 
   const payload = await response.json().catch(() => ({}));
