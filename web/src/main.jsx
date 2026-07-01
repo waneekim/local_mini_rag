@@ -11,7 +11,9 @@ import {
   Folder,
   FolderUp,
   Link,
+  Maximize2,
   MessageSquare,
+  Minimize2,
   Pencil,
   Plus,
   RefreshCw,
@@ -65,7 +67,24 @@ function App() {
   const [editingMode, setEditingMode] = useState(null); // mode being edited/created in settings
   const [crop, setCrop] = useState(null); // { src, w, h } captured screenshot to crop
   const [dragRect, setDragRect] = useState(null); // selection rect in client coords
-  const compact = useMemo(() => new URLSearchParams(window.location.search).get("compact") === "1", []);
+  const [compact, setCompact] = useState(() => {
+    const p = new URLSearchParams(window.location.search).get("compact");
+    if (p === "1") return true;
+    if (p === "0") return false;
+    return localStorage.getItem("rag.compact") === "1";
+  });
+
+  function toggleCompact() {
+    setCompact((v) => {
+      const next = !v;
+      localStorage.setItem("rag.compact", next ? "1" : "0");
+      const url = new URL(window.location.href);
+      if (next) url.searchParams.set("compact", "1");
+      else url.searchParams.delete("compact");
+      window.history.replaceState({}, "", url);
+      return next;
+    });
+  }
 
   const [editingId, setEditingId] = useState("");
   const [editingName, setEditingName] = useState("");
@@ -1590,7 +1609,15 @@ function App() {
             <p>Agent</p>
             <h2>{activeProfile?.name || "Profile"}</h2>
           </div>
-          <span className="status-line">{status}</span>
+          <div className="workspace-header-right">
+            <span className="status-line">{status}</span>
+            {compact && (
+              <button className="icon-button" type="button" title="설정" onClick={openSettings}><Settings size={16} /></button>
+            )}
+            <button className="icon-button" type="button" title={compact ? "확장 모드" : "컴팩트 모드"} onClick={toggleCompact}>
+              {compact ? <Maximize2 size={16} /> : <Minimize2 size={16} />}
+            </button>
+          </div>
         </header>
 
         <div className="chat-layout">
