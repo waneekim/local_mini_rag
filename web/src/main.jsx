@@ -104,7 +104,7 @@ function App() {
   const [presetName, setPresetName] = useState("");
   const [settingsForm, setSettingsForm] = useState(null);
 
-  const [sidebarWidth, setSidebarWidth] = useState(() => Number(localStorage.getItem("rag.sidebarWidth")) || 320);
+  const [sidebarWidth, setSidebarWidth] = useState(() => Math.max(288, Number(localStorage.getItem("rag.sidebarWidth")) || 320));
   const [citationsWidth, setCitationsWidth] = useState(() => Number(localStorage.getItem("rag.citationsWidth")) || 220);
   const [inputHeight, setInputHeight] = useState(() => Number(localStorage.getItem("rag.inputHeight")) || 64);
 
@@ -1621,7 +1621,7 @@ function App() {
       <div
         className="resizer"
         role="separator"
-        onMouseDown={(e) => startResize(e, { startWidth: sidebarWidth, sign: 1, min: 240, max: 560, set: setSidebarWidth, storageKey: "rag.sidebarWidth" })}
+        onMouseDown={(e) => startResize(e, { startWidth: sidebarWidth, sign: 1, min: 288, max: 560, set: setSidebarWidth, storageKey: "rag.sidebarWidth" })}
       />
 
       {/* Workspace */}

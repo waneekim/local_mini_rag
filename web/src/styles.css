@@ -170,10 +170,19 @@ input:focus, select:focus, textarea:focus {
 .brand-full { font-size: 0.74rem; font-weight: 600; color: var(--ink); }
 
 .brand-model {
-  font-size: 0.76rem;
+  display: inline-block;
+  max-width: 100%;
+  margin-top: 3px;
+  font-size: 0.64rem;
+  font-weight: 700;
+  color: var(--accent-dark);
+  background: #e5f3ef;
+  padding: 1px 7px;
+  border-radius: 999px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  vertical-align: top;
 }
 
 /* ── Agent list ── */
