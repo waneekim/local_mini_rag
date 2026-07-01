@@ -374,12 +374,13 @@ function App() {
 
   async function extractFromImage(dataUrl) {
     setBusy(true);
-    setStatus("이미지에서 텍스트 추출 중…");
+    setStatus("이미지에서 텍스트 추출 중… (수 초~수십 초)");
     try {
+      const image = await downscaleImage(dataUrl);
       const { text } = await fetchJson("/api/vision/extract", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ image: dataUrl })
+        body: JSON.stringify({ image })
       });
       if (text) {
         setQuery((q) => (q ? `${q}\n${text}` : text));
@@ -1852,6 +1853,24 @@ function escapeHtml(text) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+// Downscale large screenshots before sending to the vision model — big images
+// blow up the vision-token count and time out. Longest side capped, JPEG output.
+async function downscaleImage(dataUrl, maxDim = 1400) {
+  try {
+    const img = new Image();
+    img.src = dataUrl;
+    await img.decode();
+    const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(img.width * scale));
+    canvas.height = Math.max(1, Math.round(img.height * scale));
+    canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", 0.9);
+  } catch {
+    return dataUrl;
+  }
 }
 
 // Render the composer text with a leading /command and @Agent mentions shown as
