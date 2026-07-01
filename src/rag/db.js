@@ -71,7 +71,19 @@ export function createDatabase(dbPath) {
       created_at TEXT NOT NULL
     );
   `);
+  migrate(db);
   return db;
+}
+
+// Lightweight, idempotent column migrations so existing data/rag.sqlite files
+// pick up new columns without a manual reset.
+function migrate(db) {
+  const columns = db.prepare("PRAGMA table_info(profiles)").all().map((c) => c.name);
+  // `published` marks a profile as part of the shared "central library" that
+  // remote viewers can browse and copy. 0 = private (default), 1 = published.
+  if (!columns.includes("published")) {
+    db.exec("ALTER TABLE profiles ADD COLUMN published INTEGER NOT NULL DEFAULT 0");
+  }
 }
 
 export function one(db, sql, ...params) {

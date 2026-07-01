@@ -6,11 +6,14 @@ import {
   ChevronDown,
   ChevronRight,
   Database,
+  Download,
   File,
   FileText,
   Folder,
   FolderUp,
+  Globe,
   Link,
+  Lock,
   Maximize2,
   MessageSquare,
   Minimize2,
@@ -21,6 +24,7 @@ import {
   Send,
   Settings,
   Trash2,
+  Unlock,
   Upload,
   X,
   Zap
@@ -103,6 +107,14 @@ function App() {
   const [settingsState, setSettingsState] = useState(null);
   const [presetName, setPresetName] = useState("");
   const [settingsForm, setSettingsForm] = useState(null);
+
+  // Central library (shared RAG) + admin gating for a host instance.
+  const [adminRequired, setAdminRequired] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [adminInput, setAdminInput] = useState("");
+  const [centralUrl, setCentralUrl] = useState(() => localStorage.getItem("ark.centralUrl") || "");
+  const [centralList, setCentralList] = useState(null); // null=not browsed, []=browsed empty
+  const [centralBusy, setCentralBusy] = useState(false);
 
   const [sidebarWidth, setSidebarWidth] = useState(() => Math.max(288, Number(localStorage.getItem("rag.sidebarWidth")) || 320));
   const [citationsWidth, setCitationsWidth] = useState(() => Number(localStorage.getItem("rag.citationsWidth")) || 220);
@@ -222,15 +234,22 @@ function App() {
   }, [job]);
 
   async function boot() {
-    const [healthPayload, profilePayload, modePayload, skillPayload] = await Promise.all([
+    const [healthPayload, profilePayload, modePayload, skillPayload, authPayload] = await Promise.all([
       fetchJson("/v1/health"),
       fetchJson("/api/profiles"),
       fetchJson("/api/modes").catch(() => []),
-      fetchJson("/api/skills").catch(() => [])
+      fetchJson("/api/skills").catch(() => []),
+      fetchJson("/api/auth").catch(() => ({ adminRequired: false }))
     ]);
     setHealth(healthPayload);
     setModes(modePayload);
     setSkills(skillPayload);
+    setAdminRequired(Boolean(authPayload.adminRequired));
+    if (authPayload.adminRequired && localStorage.getItem("ark.adminToken")) {
+      fetchJson("/api/auth/verify", { method: "POST" })
+        .then((r) => setIsAdmin(Boolean(r.ok)))
+        .catch(() => {});
+    }
     let list = profilePayload;
     if (!list.length) {
       const created = await fetchJson("/api/profiles", {
@@ -301,6 +320,90 @@ function App() {
       }
     }
     setStatus(`삭제됨: ${p.name}`);
+  }
+
+  async function unlockAdmin() {
+    const token = adminInput.trim();
+    if (!token) return;
+    localStorage.setItem("ark.adminToken", token);
+    try {
+      const r = await fetchJson("/api/auth/verify", { method: "POST" });
+      if (r.ok) {
+        setIsAdmin(true);
+        setAdminInput("");
+        setStatus("관리자 인증됨 · 중앙 편집 가능");
+      } else {
+        localStorage.removeItem("ark.adminToken");
+        setIsAdmin(false);
+        setStatus("관리자 암호가 올바르지 않습니다.");
+      }
+    } catch (error) {
+      setStatus(`인증 실패: ${error.message}`);
+    }
+  }
+
+  function lockAdmin() {
+    localStorage.removeItem("ark.adminToken");
+    setIsAdmin(false);
+    setStatus("관리자 로그아웃");
+  }
+
+  async function togglePublish(p, e) {
+    e?.stopPropagation();
+    const next = !p.published;
+    try {
+      const updated = await fetchJson(`/api/profiles/${p.id}/publish`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ published: next })
+      });
+      setProfiles((prev) => prev.map((x) => (x.id === p.id ? updated : x)));
+      setStatus(next ? `중앙에 발행됨: ${p.name}` : `발행 취소됨: ${p.name}`);
+    } catch (error) {
+      setStatus(`발행 변경 실패: ${error.message}`);
+    }
+  }
+
+  async function browseCentral() {
+    const url = centralUrl.trim();
+    if (!url) return;
+    setCentralBusy(true);
+    setStatus("중앙 서버 조회 중…");
+    try {
+      const r = await fetchJson("/api/central/browse", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ remoteUrl: url })
+      });
+      localStorage.setItem("ark.centralUrl", r.remoteUrl || url);
+      setCentralUrl(r.remoteUrl || url);
+      setCentralList(r.profiles || []);
+      setStatus(`중앙 에이전트 ${r.profiles?.length || 0}개`);
+    } catch (error) {
+      setCentralList([]);
+      setStatus(`조회 실패: ${error.message}`);
+    } finally {
+      setCentralBusy(false);
+    }
+  }
+
+  async function importCentral(remote) {
+    setCentralBusy(true);
+    setStatus(`'${remote.name}' 복제 중…`);
+    try {
+      const r = await fetchJson("/api/central/import", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ remoteUrl: centralUrl.trim(), profileId: remote.id })
+      });
+      setProfiles((prev) => [r.profile, ...prev]);
+      selectAgent(r.profile.id);
+      setStatus(r.reembedded ? `복제 완료(로컬 재임베딩): ${r.profile.name}` : `복제 완료: ${r.profile.name}`);
+    } catch (error) {
+      setStatus(`복제 실패: ${error.message}`);
+    } finally {
+      setCentralBusy(false);
+    }
   }
 
   async function loadSources(pid) {
@@ -1416,6 +1519,90 @@ function App() {
             </div>
 
             <div className="settings-section">
+              <h3><Globe size={15} style={{ verticalAlign: "-2px", marginRight: 4 }} />중앙 라이브러리 <span className="optional">(공유 RAG · 발행 / 가져오기)</span></h3>
+
+              {adminRequired && (
+                <div className="central-admin">
+                  {isAdmin ? (
+                    <div className="central-admin-on">
+                      <span><Unlock size={14} /> 관리자 인증됨 — 중앙 에이전트 편집·발행 가능</span>
+                      <button type="button" className="secondary mini-btn" onClick={lockAdmin}>로그아웃</button>
+                    </div>
+                  ) : (
+                    <label>
+                      <Lock size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />관리자 암호 <span className="optional">(중앙 서버 수정용)</span>
+                      <div className="skill-repo-row">
+                        <input
+                          type="password"
+                          value={adminInput}
+                          onChange={(e) => setAdminInput(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") unlockAdmin(); }}
+                          placeholder="사장님이 발급한 암호"
+                        />
+                        <button type="button" className="secondary" onClick={unlockAdmin} disabled={!adminInput.trim()}>인증</button>
+                      </div>
+                    </label>
+                  )}
+                </div>
+              )}
+
+              <p className="skill-group-label">발행 <span className="optional">(이 PC를 중앙 서버로 쓸 때 · 다른 사람이 열람·복제)</span></p>
+              {profiles.length ? (
+                profiles.map((p) => (
+                  <div key={p.id} className="skill-row">
+                    <div className="skill-meta">
+                      <strong>{p.name}</strong>
+                      <span>{p.published ? "🟢 중앙에 발행됨" : "⚪ 비공개"}</span>
+                    </div>
+                    <button
+                      type="button"
+                      className={p.published ? "mini danger" : "secondary mini-btn"}
+                      onClick={(e) => togglePublish(p, e)}
+                      disabled={adminRequired && !isAdmin}
+                      title={adminRequired && !isAdmin ? "관리자 인증 필요" : ""}
+                    >
+                      {p.published ? "발행 취소" : "발행"}
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <p className="empty tiny">발행할 Agent가 없습니다.</p>
+              )}
+
+              <p className="skill-group-label" style={{ marginTop: 14 }}>중앙에서 가져오기 <span className="optional">(사장님 서버 주소로 접속해 내 로컬로 복제)</span></p>
+              <div className="skill-repo-row">
+                <input
+                  value={centralUrl}
+                  onChange={(e) => setCentralUrl(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") browseCentral(); }}
+                  placeholder="http://192.168.0.10:8787"
+                />
+                <button type="button" className="secondary" onClick={browseCentral} disabled={centralBusy || !centralUrl.trim()}>
+                  <RefreshCw size={15} />불러오기
+                </button>
+              </div>
+              {centralList !== null && (
+                centralList.length ? (
+                  <div className="skill-group">
+                    {centralList.map((c) => (
+                      <div key={c.id} className="skill-row">
+                        <div className="skill-meta">
+                          <strong>{c.name}</strong>
+                          <span>{c.description || `소스 ${c.sourceCount} · 청크 ${c.chunkCount}`}</span>
+                        </div>
+                        <button type="button" className="secondary mini-btn" disabled={centralBusy} onClick={() => importCentral(c)}>
+                          <Download size={14} />복제
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="empty tiny">발행된 중앙 에이전트가 없습니다.</p>
+                )
+              )}
+            </div>
+
+            <div className="settings-section">
               <h3>대화 모드 <span className="optional">({modes.length}/10 · 프롬프트 위 칩)</span></h3>
               {!editingMode ? (
                 <>
@@ -1972,8 +2159,13 @@ function highlightTerms(escapedText, query) {
   }
 }
 
-async function fetchJson(url, options) {
-  const response = await fetch(`${API}${url}`, options);
+async function fetchJson(url, options = {}) {
+  const token = localStorage.getItem("ark.adminToken");
+  const headers = { ...(options.headers || {}) };
+  // Central-host instances gate mutations on the admin token; a personal
+  // local instance ignores the header, so sending it always is harmless.
+  if (token) headers["x-ark-admin"] = token;
+  const response = await fetch(`${API}${url}`, { ...options, headers });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
   return payload;

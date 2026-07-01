@@ -128,6 +128,183 @@ class RagService {
     return { ok: true };
   }
 
+  // --- Central library (shared RAG) ---------------------------------------
+  // The host marks profiles as `published` so remote viewers can browse them
+  // read-only and copy them into their own local instance.
+
+  setPublished(profileId, published) {
+    this.ensureProfile(profileId);
+    run(this.db, "UPDATE profiles SET published = ?, updated_at = ? WHERE id = ?", published ? 1 : 0, nowIso(), profileId);
+    return this.getProfile(profileId);
+  }
+
+  // Identifies the vector space so an importer knows whether it can copy the
+  // embeddings as-is or must re-embed the chunk text with its own model.
+  embeddingFingerprint() {
+    const d = this.embeddings.describe();
+    return { backend: d.backend, model: d.model };
+  }
+
+  // Published profiles with chunk/source counts for the central library list.
+  listCentral() {
+    return all(this.db, "SELECT * FROM profiles WHERE published = 1 ORDER BY updated_at DESC").map((profile) => ({
+      id: profile.id,
+      name: profile.name,
+      description: profile.description,
+      updated_at: profile.updated_at,
+      sourceCount: one(this.db, "SELECT COUNT(*) AS count FROM sources WHERE profile_id = ?", profile.id).count,
+      chunkCount: one(this.db, "SELECT COUNT(*) AS count FROM chunks WHERE profile_id = ?", profile.id).count,
+      embedding: this.embeddingFingerprint()
+    }));
+  }
+
+  // Self-contained snapshot (sources + chunks with embeddings) of one published
+  // profile, safe to hand to a remote instance. Host-local file paths are dropped.
+  exportProfile(profileId) {
+    const profile = this.ensureProfile(profileId);
+    if (!profile.published) throw Object.assign(new Error("Profile is not published"), { statusCode: 403 });
+    const sources = all(this.db, "SELECT * FROM sources WHERE profile_id = ? ORDER BY created_at ASC", profileId);
+    const chunks = all(this.db, "SELECT * FROM chunks WHERE profile_id = ?", profileId);
+    return {
+      format: "ark-central-export/1",
+      embedding: this.embeddingFingerprint(),
+      profile: { name: profile.name, description: profile.description },
+      sources: sources.map((s) => ({
+        refId: s.id,
+        kind: s.kind,
+        title: s.title,
+        file_name: s.file_name,
+        relative_path: s.relative_path,
+        mime_type: s.mime_type,
+        pasted_text: s.pasted_text,
+        status: s.status,
+        error: s.error,
+        metadata_json: s.metadata_json,
+        content_hash: s.content_hash,
+        indexed_at: s.indexed_at
+      })),
+      chunks: chunks.map((c) => ({
+        sourceRefId: c.source_id,
+        chunk_index: c.chunk_index,
+        text: c.text,
+        locator_json: c.locator_json,
+        embedding_json: c.embedding_json
+      }))
+    };
+  }
+
+  // Pull a published profile from a remote host into a private local copy.
+  // Reuses the remote embeddings when the vector space matches, otherwise
+  // re-embeds every chunk with the local embedding model.
+  async importFromRemote(input = {}) {
+    const base = normalizeBaseUrl(input.remoteUrl);
+    const remoteProfileId = String(input.profileId || "").trim();
+    if (!remoteProfileId) throw Object.assign(new Error("profileId is required"), { statusCode: 400 });
+
+    let payload;
+    try {
+      const response = await fetch(`${base}/api/central/profiles/${encodeURIComponent(remoteProfileId)}/export`, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(Number(process.env.RAG_URL_TIMEOUT_MS || 20_000))
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      payload = await response.json();
+    } catch (error) {
+      throw Object.assign(new Error(`중앙 서버에서 가져오지 못했습니다: ${error.message}`), { statusCode: 502 });
+    }
+    if (payload?.format !== "ark-central-export/1") {
+      throw Object.assign(new Error("지원하지 않는 내보내기 형식입니다."), { statusCode: 422 });
+    }
+
+    const local = this.embeddingFingerprint();
+    const compatible =
+      payload.embedding?.backend === local.backend && payload.embedding?.model === local.model;
+
+    const at = nowIso();
+    const newProfileId = id("profile");
+    const name = nonEmpty(input.newName, "") || `${nonEmpty(payload.profile?.name, "가져온 에이전트")} (중앙)`;
+    run(
+      this.db,
+      "INSERT INTO profiles (id, name, description, created_at, updated_at, published) VALUES (?, ?, ?, ?, ?, 0)",
+      newProfileId,
+      name,
+      String(payload.profile?.description || ""),
+      at,
+      at
+    );
+
+    // Map remote source ids -> new local ids and copy source rows (no files).
+    const sourceIdMap = new Map();
+    for (const s of payload.sources || []) {
+      const newSourceId = id("source");
+      sourceIdMap.set(s.refId, newSourceId);
+      insertSource(this.db, {
+        id: newSourceId,
+        profile_id: newProfileId,
+        kind: s.kind || "text",
+        title: s.title || "source",
+        file_name: s.file_name || "",
+        relative_path: s.relative_path || "",
+        mime_type: s.mime_type || "",
+        file_path: "",
+        pasted_text: s.pasted_text || "",
+        status: s.status || "indexed",
+        error: s.error || "",
+        metadata_json: s.metadata_json || "{}",
+        content_hash: s.content_hash || "",
+        created_at: at,
+        updated_at: at,
+        indexed_at: s.indexed_at || at
+      });
+    }
+
+    const chunks = (payload.chunks || []).filter((c) => sourceIdMap.has(c.sourceRefId));
+    let vectors = null;
+    if (!compatible) {
+      // Re-embed chunk text with the local model, batched to bound request size.
+      vectors = [];
+      const texts = chunks.map((c) => c.text);
+      for (let i = 0; i < texts.length; i += 64) {
+        const batch = await this.embeddings.embed(texts.slice(i, i + 64), { mode: "passage" });
+        vectors.push(...batch);
+      }
+    }
+
+    chunks.forEach((c, index) => {
+      run(
+        this.db,
+        `INSERT INTO chunks (id, profile_id, source_id, chunk_index, text, locator_json, embedding_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        id("chunk"),
+        newProfileId,
+        sourceIdMap.get(c.sourceRefId),
+        c.chunk_index,
+        c.text,
+        c.locator_json || "{}",
+        compatible ? c.embedding_json : JSON.stringify(vectors[index]),
+        at
+      );
+    });
+
+    return { profile: this.getProfile(newProfileId), reembedded: !compatible, chunks: chunks.length };
+  }
+
+  // Proxy the remote host's central list so the browser avoids cross-origin calls.
+  async browseRemote(remoteUrl) {
+    const base = normalizeBaseUrl(remoteUrl);
+    try {
+      const response = await fetch(`${base}/api/central/profiles`, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(Number(process.env.RAG_URL_TIMEOUT_MS || 20_000))
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const profiles = await response.json();
+      return { remoteUrl: base, profiles: Array.isArray(profiles) ? profiles : [] };
+    } catch (error) {
+      throw Object.assign(new Error(`중앙 서버에 연결하지 못했습니다: ${error.message}`), { statusCode: 502 });
+    }
+  }
+
   ensureProfile(profileId) {
     const profile = this.getProfile(profileId);
     if (!profile) throw Object.assign(new Error("Profile not found"), { statusCode: 404 });
@@ -796,4 +973,12 @@ function sourceVersion(db, profileId) {
 function nonEmpty(value, fallback) {
   const text = String(value || "").trim();
   return text || fallback;
+}
+
+function normalizeBaseUrl(value) {
+  const raw = String(value || "").trim();
+  if (!/^https?:\/\//i.test(raw)) {
+    throw Object.assign(new Error("유효한 http(s) 서버 주소가 필요합니다."), { statusCode: 400 });
+  }
+  return raw.replace(/\/+$/, "");
 }

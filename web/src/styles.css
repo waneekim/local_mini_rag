@@ -1083,6 +1083,20 @@ input:focus, select:focus, textarea:focus {
   padding: 16px 22px;
 }
 
+/* Central library admin */
+.central-admin { margin-bottom: 14px; }
+.central-admin-on {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(46, 160, 67, 0.12);
+  font-size: 0.82rem;
+}
+.central-admin-on span { display: inline-flex; align-items: center; gap: 6px; }
+
 /* Skills manager */
 .skill-repo-row { display: flex; gap: 8px; }
 .skill-repo-row input { flex: 1; }
