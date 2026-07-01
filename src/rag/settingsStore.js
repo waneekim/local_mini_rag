@@ -51,6 +51,7 @@ export class SettingsStore {
         provider: llm.provider ?? process.env.LLM_PROVIDER ?? "openai-compatible",
         baseUrl: llm.baseUrl ?? process.env.LLM_BASE_URL ?? "",
         model: llm.model ?? process.env.LLM_MODEL ?? "",
+        visionModel: llm.visionModel ?? process.env.VISION_MODEL ?? "",
         apiKey: llm.apiKey ?? process.env.LLM_API_KEY ?? ""
       },
       embedding: {
