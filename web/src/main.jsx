@@ -104,6 +104,8 @@ function App() {
   const [settingsState, setSettingsState] = useState(null);
   const [presetName, setPresetName] = useState("");
   const [settingsForm, setSettingsForm] = useState(null);
+  const [auditSetState, setAuditSetState] = useState({ activeAuditSet: "", auditSets: [] });
+  const [auditSetForm, setAuditSetForm] = useState(null);
 
   const [sidebarWidth, setSidebarWidth] = useState(() => Math.max(288, Number(localStorage.getItem("rag.sidebarWidth")) || 320));
   const [citationsWidth, setCitationsWidth] = useState(() => Number(localStorage.getItem("rag.citationsWidth")) || 220);
@@ -134,6 +136,10 @@ function App() {
 
   const activeMode = useMemo(() => modes.find((m) => m.key === chatMode) || null, [modes, chatMode]);
   const activeCitationGroups = useMemo(() => buildCitationGroups(activeCitations), [activeCitations]);
+  const activeAuditSet = useMemo(
+    () => auditSetState.auditSets?.find((set) => set.id === auditSetState.activeAuditSet) || auditSetState.auditSets?.[0] || null,
+    [auditSetState]
+  );
 
   const commandList = useMemo(() => {
     const modeCmds = modes.map((m) => ({ cmd: m.label, desc: `모드 · ${m.hint}` }));
@@ -224,15 +230,17 @@ function App() {
   }, [job]);
 
   async function boot() {
-    const [healthPayload, profilePayload, modePayload, skillPayload] = await Promise.all([
+    const [healthPayload, profilePayload, modePayload, skillPayload, auditSetPayload] = await Promise.all([
       fetchJson("/v1/health"),
       fetchJson("/api/profiles"),
       fetchJson("/api/modes").catch(() => []),
-      fetchJson("/api/skills").catch(() => [])
+      fetchJson("/api/skills").catch(() => []),
+      fetchJson("/api/audit-sets").catch(() => ({ activeAuditSet: "", auditSets: [] }))
     ]);
     setHealth(healthPayload);
     setModes(modePayload);
     setSkills(skillPayload);
+    setAuditSetState(auditSetPayload);
     let list = profilePayload;
     if (!list.length) {
       const created = await fetchJson("/api/profiles", {
@@ -905,11 +913,15 @@ function App() {
     setBusy(true);
     setStatus("답변 생성 중");
     try {
-      const payload = await fetchJson(`/api/profiles/${targetId}/chat`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ query: text, topK: 4, mode })
-      });
+      const useAuditSet = isFigmaMode(mode, modes) && !crossAgent && activeAuditSet?.phraseGuideProfileId && activeAuditSet?.glossaryProfileId;
+      const payload = await fetchJson(
+        useAuditSet ? `/api/audit-sets/${encodeURIComponent(activeAuditSet.id)}/review` : `/api/profiles/${targetId}/chat`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ query: text, topK: 4, mode })
+        }
+      );
       const cites = (payload.citations || []).map((c) => ({ ...c, query: text }));
       const used = new Set([...String(payload.answer).matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
       const panelCites = used.size ? cites.filter((c) => used.has(c.number)) : cites;
@@ -996,13 +1008,30 @@ function App() {
     setSettingsForm({ llm: { ...target.llm }, embedding: { ...target.embedding } });
   }
 
+  function loadAuditSetIntoForm(state) {
+    const target = state.auditSets?.find((set) => set.id === state.activeAuditSet) || state.auditSets?.[0] || null;
+    setAuditSetForm(
+      target
+        ? { ...target }
+        : {
+            id: "",
+            name: "기본 규율 검수 세트",
+            phraseGuideProfileId: "",
+            glossaryProfileId: ""
+          }
+    );
+  }
+
   async function openSettings() {
-    const [state, skillCfg] = await Promise.all([
+    const [state, skillCfg, auditSets] = await Promise.all([
       fetchJson("/api/settings"),
-      fetchJson("/api/skills/config").catch(() => ({ repo: "" }))
+      fetchJson("/api/skills/config").catch(() => ({ repo: "" })),
+      fetchJson("/api/audit-sets").catch(() => ({ activeAuditSet: "", auditSets: [] }))
     ]);
     setSettingsState(state);
+    setAuditSetState(auditSets);
     loadPresetIntoForm(state, state.activePreset);
+    loadAuditSetIntoForm(auditSets);
     setSkillRepo(skillCfg.repo || "");
     setAvailableSkills([]);
     setEditingMode(null);
@@ -1140,6 +1169,15 @@ function App() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name: presetName, ...settingsForm })
     });
+    if (auditSetForm?.name?.trim() && auditSetForm.phraseGuideProfileId && auditSetForm.glossaryProfileId) {
+      const auditSets = await fetchJson("/api/audit-sets", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(auditSetForm)
+      });
+      setAuditSetState(auditSets);
+      loadAuditSetIntoForm(auditSets);
+    }
     setSettingsState(state);
     setSettingsOpen(false);
     setHealth(await fetchJson("/v1/health"));
@@ -1157,6 +1195,7 @@ function App() {
 
   const setLlmField = (key, value) => setSettingsForm((f) => ({ ...f, llm: { ...f.llm, [key]: value } }));
   const setEmbField = (key, value) => setSettingsForm((f) => ({ ...f, embedding: { ...f.embedding, [key]: value } }));
+  const setAuditSetField = (key, value) => setAuditSetForm((f) => ({ ...f, [key]: value }));
 
   // ── Resizers ──
 
@@ -1388,6 +1427,36 @@ function App() {
                 </label>
                 <label>API Key <span className="optional">(선택)</span><input type="password" value={settingsForm.embedding.apiKey || ""} onChange={(e) => setEmbField("apiKey", e.target.value)} placeholder="없으면 비워두세요" /></label>
               </div>
+            </div>
+
+            <div className="settings-section">
+              <h3>규율 검수 세트 <span className="optional">(문장 가이드 Agent + 단어장 Agent)</span></h3>
+              {auditSetForm && (
+                <div className="settings-grid">
+                  <label>
+                    세트 이름
+                    <input value={auditSetForm.name || ""} onChange={(e) => setAuditSetField("name", e.target.value)} placeholder="기본 규율 검수 세트" />
+                  </label>
+                  <label>
+                    문장 가이드 Agent
+                    <select value={auditSetForm.phraseGuideProfileId || ""} onChange={(e) => setAuditSetField("phraseGuideProfileId", e.target.value)}>
+                      <option value="">선택</option>
+                      {profiles.map((profile) => (
+                        <option key={profile.id} value={profile.id}>{profile.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    단어장 Agent
+                    <select value={auditSetForm.glossaryProfileId || ""} onChange={(e) => setAuditSetField("glossaryProfileId", e.target.value)}>
+                      <option value="">선택</option>
+                      {profiles.map((profile) => (
+                        <option key={profile.id} value={profile.id}>{profile.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              )}
             </div>
 
             <div className="settings-section">
@@ -1795,6 +1864,16 @@ function statusLabel(status) {
   if (status === "failed_with_action") return "임베딩 실패";
   if (status === "embedding" || status === "extracting") return "처리 중";
   return "임베딩 대기";
+}
+
+function isFigmaMode(mode, modes) {
+  const found = modes.find((item) => item.key === mode);
+  const values = [mode, found?.key, found?.label, ...(found?.aliases || [])]
+    .filter(Boolean)
+    .map((value) => String(value).toLowerCase());
+  return values.some((value) =>
+    ["규율", "규격", "검수", "피그마", "figma", "figma-audit", "figmaaudit", "화면검수", "문구검수", "용어검수"].includes(value)
+  );
 }
 
 function buildTree(sources) {

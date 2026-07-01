@@ -7,14 +7,36 @@ import { createApp } from "../src/app.js";
 import { EmbeddingService, localNgramEmbedding } from "../src/rag/embedding.js";
 import { extractExactTextCandidates, extractFigmaTextCandidates, repairFigmaAuditAnswer } from "../src/rag/figmaAudit.js";
 import { ModeStore } from "../src/rag/modeStore.js";
+import { resolveRetrievalPolicy } from "../src/rag/retrievalPolicy.js";
 import { normalizeUploadedFileName, sanitizeFileName } from "../src/rag/sanitize.js";
-import { cosineSimilarity } from "../src/rag/vectorMath.js";
+import { bm25Scores, cosineSimilarity } from "../src/rag/vectorMath.js";
 
 test("local embeddings rank related text above unrelated text", () => {
   const query = localNgramEmbedding("환불 정책");
   const related = localNgramEmbedding("고객 환불 정책은 구매 후 7일 이내에 처리됩니다.");
   const unrelated = localNgramEmbedding("오늘 점심 메뉴는 김치찌개입니다.");
   assert.ok(cosineSimilarity(query, related) > cosineSimilarity(query, unrelated));
+});
+
+test("bm25 lexical scores rank exact policy text above unrelated text", () => {
+  const scores = bm25Scores("환불 정책", [
+    "고객 환불 정책은 구매 후 7일 이내에 처리됩니다.",
+    "오늘 점심 메뉴는 김치찌개입니다."
+  ]);
+  assert.equal(scores[0] > scores[1], true);
+  assert.equal(scores[0], 1);
+});
+
+test("retrieval policy maps modes to strict grounding and candidate budgets", () => {
+  const search = resolveRetrievalPolicy({ topK: 4 }, { key: "search", label: "검색", aliases: ["검색"] });
+  const figma = resolveRetrievalPolicy({}, { key: "figmaAudit", label: "규율", aliases: ["규율"] });
+  const general = resolveRetrievalPolicy({}, { key: "general", label: "일반", aliases: ["일반"] });
+
+  assert.equal(search.strictGrounding, true);
+  assert.equal(search.topK, 4);
+  assert.equal(search.candidateK >= search.topK, true);
+  assert.equal(figma.name, "figmaAudit");
+  assert.equal(general.strictGrounding, false);
 });
 
 test("http embedding backend uses OpenAI-compatible embeddings endpoint", async () => {
@@ -272,6 +294,177 @@ test("profile text sources can be indexed, searched, and isolated", async () => 
   }
 });
 
+test("search returns retrieval metadata and chat includes agent purpose", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-api-policy-"));
+  let seen = null;
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      generate: async (payload) => {
+        seen = payload;
+        return {
+          answer: "policy answer [1]",
+          provider: { provider: "test", model: "mock" },
+          raw: {}
+        };
+      }
+    }
+  });
+
+  try {
+    const created = await post(app, "/api/profiles", { name: "Refund Agent" });
+    const profile = await patch(app, `/api/profiles/${created.id}`, {
+      description: "환불 규칙 질문에 정확한 정책 근거로 답한다."
+    });
+    await post(app, `/api/profiles/${profile.id}/sources/text`, {
+      title: "환불 정책",
+      text: "환불 정책은 구매 후 7일 이내에만 적용됩니다."
+    });
+
+    const job = await post(app, `/api/profiles/${profile.id}/index`, {});
+    await waitForJob(app, job.id);
+
+    const search = await post(app, `/api/profiles/${profile.id}/search`, {
+      query: "환불 기간",
+      mode: "search",
+      topK: 3
+    });
+    assert.equal(search.retrieval.policyName, "search");
+    assert.equal(search.retrieval.strictGrounding, true);
+    assert.equal(search.retrieval.topK, 3);
+    assert.equal(search.retrieval.profilePurpose, true);
+
+    const chat = await post(app, `/api/profiles/${profile.id}/chat`, {
+      query: "환불 기간",
+      mode: "search",
+      topK: 3
+    });
+    assert.equal(chat.retrieval.policyName, "search");
+    assert.equal(seen.envelope.agentPurpose, "환불 규칙 질문에 정확한 정책 근거로 답한다.");
+  } finally {
+    await app.close();
+  }
+});
+
+test("requested rerank can reorder hybrid candidates and reports metadata", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-api-rerank-"));
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      rerank: async ({ hits }) => ({
+        ranking: hits
+          .slice()
+          .reverse()
+          .map((hit, index) => ({ id: hit.id, score: index === 0 ? 1 : 0.2 }))
+      }),
+      generate: async ({ envelope }) => ({
+        answer: `answer with ${envelope.citations.length} citations`,
+        provider: { provider: "test", model: "mock" },
+        raw: {}
+      })
+    }
+  });
+
+  try {
+    const profile = await post(app, "/api/profiles", { name: "Policies" });
+    await post(app, `/api/profiles/${profile.id}/sources/text`, {
+      title: "A 정책",
+      text: "환불 정책은 구매 후 7일 이내에 처리됩니다."
+    });
+    await post(app, `/api/profiles/${profile.id}/sources/text`, {
+      title: "B 정책",
+      text: "배송 정책은 영업일 기준 3일 이내에 처리됩니다."
+    });
+
+    const job = await post(app, `/api/profiles/${profile.id}/index`, {});
+    await waitForJob(app, job.id);
+
+    const baseline = await post(app, `/api/profiles/${profile.id}/search`, {
+      query: "정책 처리",
+      topK: 2,
+      mode: "search"
+    });
+    const reranked = await post(app, `/api/profiles/${profile.id}/search`, {
+      query: "정책 처리",
+      topK: 2,
+      mode: "search",
+      rerank: true
+    });
+
+    assert.equal(reranked.retrieval.reranked, true);
+    assert.notEqual(reranked.hits[0].id, baseline.hits[0].id);
+    assert.equal(typeof reranked.hits[0].rerankScore, "number");
+  } finally {
+    await app.close();
+  }
+});
+
+test("audit set review combines phrase guide and structured glossary agents", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-api-auditset-"));
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      generate: async ({ envelope }) => ({
+        answer: `unused ${envelope.citations.length}`,
+        provider: { provider: "test", model: "mock" },
+        raw: {}
+      })
+    }
+  });
+
+  try {
+    const guide = await post(app, "/api/profiles", { name: "문장 가이드" });
+    const glossary = await post(app, "/api/profiles", { name: "단어장" });
+
+    await post(app, `/api/profiles/${guide.id}/sources/text`, {
+      title: "문장 가이드",
+      text: "삼성전자 가전은 예쁩니다\n제품 라벨 문장은 짧고 승인된 용어를 사용합니다."
+    });
+    await post(app, `/api/profiles/${glossary.id}/sources/text`, {
+      title: "terms.csv",
+      text: "잘못된 표현,올바른 표현,위험도,근거\n가전제품,가전,높음,제품 라벨에서는 가전을 사용합니다"
+    });
+
+    await waitForJob(app, (await post(app, `/api/profiles/${guide.id}/index`, {})).id);
+    await waitForJob(app, (await post(app, `/api/profiles/${glossary.id}/index`, {})).id);
+
+    const auditState = await put(app, "/api/audit-sets", {
+      name: "가전 검수",
+      phraseGuideProfileId: guide.id,
+      glossaryProfileId: glossary.id
+    });
+    const auditSet = auditState.auditSets[0];
+    const review = await post(app, `/api/audit-sets/${auditSet.id}/review`, {
+      query: "삼성전자 가전제품은 예쁩니다",
+      mode: "figmaAudit"
+    });
+
+    assert.match(review.answer, /올바른 문장: 삼성전자 가전은 예쁩니다/);
+    assert.match(review.answer, /가전제품: 수정 필요 → 가전/);
+    assert.match(review.answer, /위험도 높음/);
+    assert.match(review.answer, /추천 표현:/);
+    assert.equal(review.retrieval.glossaryExactMatches, 1);
+    assert.equal(review.citations.some((citation) => citation.sourceType === "glossary"), true);
+
+    const figmaReview = await post(app, "/api/figma/audit", {
+      auditSetId: auditSet.id,
+      text: "삼성전자 가전제품은 예쁩니다"
+    });
+    assert.match(figmaReview.answer, /가전제품: 수정 필요 → 가전/);
+  } finally {
+    await app.close();
+  }
+});
+
 test("figma chat repairs hallucinated LLM output using exact source text", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "rag-api-figma-repair-"));
   let seen = null;
@@ -431,6 +624,28 @@ test("figma audit endpoint formats selected nodes for cited RAG review", async (
 async function post(app, url, body) {
   const response = await app.inject({
     method: "POST",
+    url,
+    payload: body,
+    headers: { "content-type": "application/json" }
+  });
+  assert.equal(response.statusCode < 300, true, response.body);
+  return response.json();
+}
+
+async function put(app, url, body) {
+  const response = await app.inject({
+    method: "PUT",
+    url,
+    payload: body,
+    headers: { "content-type": "application/json" }
+  });
+  assert.equal(response.statusCode < 300, true, response.body);
+  return response.json();
+}
+
+async function patch(app, url, body) {
+  const response = await app.inject({
+    method: "PATCH",
     url,
     payload: body,
     headers: { "content-type": "application/json" }

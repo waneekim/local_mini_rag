@@ -48,6 +48,26 @@ export function createDatabase(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_chunks_profile ON chunks(profile_id);
     CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_id);
 
+    CREATE TABLE IF NOT EXISTS glossary_entries (
+      id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+      source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+      approved_term TEXT NOT NULL DEFAULT '',
+      disallowed_terms_json TEXT NOT NULL DEFAULT '[]',
+      synonyms_json TEXT NOT NULL DEFAULT '[]',
+      product_category TEXT NOT NULL DEFAULT '',
+      market TEXT NOT NULL DEFAULT '',
+      risk_level TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL DEFAULT '',
+      locator_json TEXT NOT NULL DEFAULT '{}',
+      raw_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_glossary_profile ON glossary_entries(profile_id);
+    CREATE INDEX IF NOT EXISTS idx_glossary_source ON glossary_entries(source_id);
+    CREATE INDEX IF NOT EXISTS idx_glossary_approved ON glossary_entries(profile_id, approved_term);
+
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
       profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,

@@ -2,6 +2,7 @@
 import argparse
 import csv
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -18,6 +19,7 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp"}
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-check", action="store_true")
+    parser.add_argument("--glossary", action="store_true")
     args = parser.parse_args()
 
     if args.self_check:
@@ -25,7 +27,7 @@ def main():
         return
 
     request = json.loads(sys.stdin.read() or "{}")
-    result = extract(request)
+    result = extract_glossary_rows(request) if args.glossary else extract(request)
     print(json.dumps(result, ensure_ascii=False))
 
 
@@ -93,6 +95,69 @@ def extract_text_file(file_path, request):
                 rows.append(" | ".join(cell.strip() for cell in row))
         return [unit("\n".join(rows), request, {"format": "csv"})]
     return [unit(read_text(path), request, {"format": path.suffix.lower().lstrip(".") or "text"})]
+
+
+def extract_glossary_rows(request):
+    try:
+        file_path = request.get("filePath") or ""
+        text = request.get("text") or ""
+        relative_path = request.get("relativePath") or request.get("fileName") or ""
+        title = request.get("title") or request.get("fileName") or "source"
+        suffix = Path(file_path or relative_path or title).suffix.lower()
+
+        if suffix == ".csv":
+            rows = glossary_rows_from_csv_text(text) if text else glossary_rows_from_csv_path(file_path)
+            return {"status": "ok", "rows": rows, "warnings": []}
+        if suffix in {".xlsx", ".xlsm"}:
+            return {"status": "ok", "rows": glossary_rows_from_xlsx(file_path), "warnings": []}
+        return {"status": "ok", "rows": [], "warnings": []}
+    except MissingDependency as exc:
+        return fail(str(exc), action=exc.action)
+    except Exception as exc:
+        return fail(str(exc))
+
+
+def glossary_rows_from_csv_path(file_path):
+    with Path(file_path).open("r", encoding="utf-8-sig", newline="") as handle:
+        return glossary_rows_from_csv_reader(csv.reader(handle), {})
+
+
+def glossary_rows_from_csv_text(text):
+    return glossary_rows_from_csv_reader(csv.reader(io.StringIO(str(text or ""))), {})
+
+
+def glossary_rows_from_csv_reader(reader, locator_base):
+    rows = list(reader)
+    if not rows:
+        return []
+    headers = [str(cell or "").strip() for cell in rows[0]]
+    out = []
+    for row_index, row in enumerate(rows[1:], start=2):
+        cells = {headers[i] or f"column_{i + 1}": str(row[i] if i < len(row) else "").strip() for i in range(len(headers))}
+        if any(cells.values()):
+            out.append({"cells": cells, "locator": {**locator_base, "rowRange": str(row_index)}})
+    return out
+
+
+def glossary_rows_from_xlsx(file_path):
+    require_module("openpyxl", "Install openpyxl with `npm run py:deps`.")
+    import openpyxl
+
+    workbook = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+    out = []
+    for sheet in workbook.worksheets:
+        iterator = sheet.iter_rows(values_only=True)
+        headers = None
+        for row_index, row in enumerate(iterator, start=1):
+            values = [format_cell(value) for value in row]
+            if headers is None:
+                if any(values):
+                    headers = [value.strip() or f"column_{i + 1}" for i, value in enumerate(values)]
+                continue
+            cells = {headers[i] if i < len(headers) else f"column_{i + 1}": values[i] if i < len(values) else "" for i in range(max(len(headers), len(values)))}
+            if any(cells.values()):
+                out.append({"cells": cells, "locator": {"sheet": sheet.title, "rowRange": str(row_index)}})
+    return out
 
 
 def extract_pdf(file_path, request):

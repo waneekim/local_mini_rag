@@ -201,6 +201,7 @@ curl -X POST http://127.0.0.1:8787/api/figma/audit \
 | `data/rag.sqlite` | 프로필·소스·청크(임베딩)·잡·대화 |
 | `data/settings.json` | 연결 프리셋(LLM·임베딩) |
 | `data/modes.json` | 대화 모드(편집 시 생성) |
+| `data/auditSets.json` | 규율 검수 세트(문장 가이드 Agent + 단어장 Agent) |
 | `data/skills.json`, `data/.skills-repo/` | 스킬 저장소 설정·캐시 |
 | `data/uploads/` | 업로드된 원본 파일 |
 | `.venv/` | 문서 추출 워커 의존성 |
@@ -223,6 +224,7 @@ curl -X POST http://127.0.0.1:8787/api/figma/audit \
 설정·모드·스킬
 - `GET/PUT /api/settings` · `POST /api/settings/select` · `DELETE /api/settings/:name`
 - `GET/PUT /api/modes` · `DELETE /api/modes/:key`
+- `GET/PUT /api/audit-sets` · `POST /api/audit-sets/:id/review`
 - `GET /api/skills` · `GET /api/skills/available` · `POST /api/skills/sync` · `/install`
 - `DELETE /api/skills/:name` · `POST /api/skills/:name/run` · `GET/PUT /api/skills/config`
 - `GET /v1/health`
@@ -232,6 +234,65 @@ curl -X POST http://127.0.0.1:8787/api/figma/audit \
 ```json
 { "profileId": "...", "query": "...", "contextText": "[1] ...", "hits": [], "citations": [], "sourceVersion": "count:updatedAt" }
 ```
+
+검색·대화 응답에는 `retrieval` 메타가 함께 들어갑니다. 모드별 검색 정책, 후보 수, 재랭킹 여부,
+근거 부족 플래그를 확인할 수 있습니다.
+
+```json
+{
+  "retrieval": {
+    "policyName": "search",
+    "candidateCount": 12,
+    "reranked": false,
+    "insufficientEvidence": false
+  }
+}
+```
+
+선택적으로 요청 본문에 `"rerank": true`를 넣으면 현재 LLM 프리셋의 OpenAI 호환
+`/chat/completions`로 후보 청크를 재정렬합니다. 실패하면 기존 hybrid 검색 점수로 자동 fallback합니다.
+
+## 12. RAG 평가
+
+프리셋/모드별 정확도는 `data/evals/*.json`에 질문 세트를 두고 확인합니다.
+
+```json
+{
+  "cases": [
+    {
+      "agent": "UX Guidelines",
+      "mode": "search",
+      "query": "버튼 문구는 어떻게 써야 하나요?",
+      "expectedSources": ["버튼 문구 가이드"],
+      "mustInclude": ["[1]"]
+    }
+  ]
+}
+```
+
+```bash
+npm run eval:rag
+npm run eval:rag -- --search-only
+npm run eval:rag -- --rerank
+```
+
+## 13. 규율 검수 세트
+
+규율 모드는 문장 가이드 Agent와 단어장 Agent를 묶어서 사용할 수 있습니다. ⚙️ → **규율 검수 세트**에서
+두 Agent를 선택하면, 규율 모드 질문은 `/api/audit-sets/:id/review`로 처리됩니다.
+
+단어장 Agent에는 CSV/XLSX를 넣을 수 있고, 다음 컬럼명을 우선 인식합니다.
+
+| 의미 | 인식 컬럼 예시 |
+|------|----------------|
+| 승인어 | 승인어, 표준어, 권장어, 올바른 표현, approved, standard |
+| 금지/비권장어 | 금지어, 비권장어, 잘못된 표현, forbidden, deprecated |
+| 동의어/유사어 | 동의어, 유사어, 대체어, synonym, alias |
+| 조건 | 제품군, 카테고리, 국가, 시장, product, market |
+| 위험도/근거 | 위험도, 리스크, 근거, 설명, risk, note |
+
+구조화 단어장은 정확 매칭을 먼저 적용하고, 자유 문서/PDF/텍스트 단어장 자료는 유사 후보 근거로 사용합니다.
+추천 표현의 `[n]` 링크를 클릭하면 기존 참조 문서 팝업에서 해당 원문 행이나 청크가 하이라이트됩니다.
 
 ---
 

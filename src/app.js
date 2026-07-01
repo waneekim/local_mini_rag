@@ -11,6 +11,7 @@ import { createRagService } from "./rag/ragService.js";
 import { ModeStore } from "./rag/modeStore.js";
 import { SettingsStore } from "./rag/settingsStore.js";
 import { SkillService } from "./rag/skills.js";
+import { AuditSetStore } from "./rag/auditSetStore.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, "..");
@@ -47,6 +48,7 @@ export async function createApp(options = {}) {
   const db = createDatabase(join(dataDir, "rag.sqlite"));
   const settingsStore = new SettingsStore(dataDir);
   const modeStore = new ModeStore(dataDir);
+  const auditSetStore = new AuditSetStore(dataDir);
   const skills = new SkillService({ projectRoot, dataDir });
   const rag = createRagService({
     db,
@@ -56,7 +58,8 @@ export async function createApp(options = {}) {
     llmProvider: options.llmProvider,
     pythonCommand: options.pythonCommand,
     settingsStore,
-    modeStore
+    modeStore,
+    auditSetStore
   });
 
   app.decorate("rag", rag);
@@ -74,6 +77,14 @@ export async function createApp(options = {}) {
   app.put("/api/modes", async (request) => modeStore.upsert(request.body || {}));
 
   app.delete("/api/modes/:key", async (request) => modeStore.remove(decodeURIComponent(request.params.key)));
+
+  app.get("/api/audit-sets", async () => auditSetStore.state());
+
+  app.put("/api/audit-sets", async (request) => auditSetStore.upsert(request.body || {}));
+
+  app.post("/api/audit-sets/:auditSetId/review", async (request) => {
+    return rag.auditSetReview(decodeURIComponent(request.params.auditSetId), request.body || {});
+  });
 
   app.get("/api/skills", async () => skills.list());
 
@@ -188,6 +199,9 @@ export async function createApp(options = {}) {
   // profile's guidelines. Defaults to the Figma-oriented 규율 mode.
   app.post("/api/validate", async (request, reply) => {
     const body = request.body || {};
+    if (body.auditSetId) {
+      return rag.auditSetReview(body.auditSetId, { ...body, text: String(body.text || "") });
+    }
     if (!body.profileId) return reply.code(400).send({ error: "profileId is required" });
     return rag.chat(body.profileId, {
       query: String(body.text || ""),
@@ -200,6 +214,7 @@ export async function createApp(options = {}) {
   // nodes and optional design metadata; the response is a normal cited RAG chat.
   app.post("/api/figma/audit", async (request, reply) => {
     const body = request.body || {};
+    if (body.auditSetId) return rag.auditSetReview(body.auditSetId, body);
     if (!body.profileId) return reply.code(400).send({ error: "profileId is required" });
     return rag.figmaAudit(body.profileId, body);
   });

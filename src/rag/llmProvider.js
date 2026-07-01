@@ -105,7 +105,7 @@ export class LlmProvider {
           },
           {
             role: "user",
-            content: `Local RAG context:\n${envelope.contextText || "(no context)"}\n\nQuestion:\n${query}`
+            content: `${agentPurposeText(envelope)}Local RAG context:\n${envelope.contextText || "(no context)"}\n\nQuestion:\n${query}`
           },
           ...messages
         ]
@@ -146,6 +146,69 @@ export class LlmProvider {
       raw: { mode: "mock", query }
     };
   }
+
+  async rerank({ query, hits = [], purpose = "", mode = "general", maxResults = 8 }) {
+    if (this.provider === "mock" || this.provider !== "openai-compatible" || !this.baseUrl || !this.model) {
+      return { ranking: [] };
+    }
+
+    const candidates = hits.slice(0, Math.max(1, maxResults * 4)).map((hit, index) => ({
+      id: hit.id,
+      number: index + 1,
+      title: hit.title,
+      text: String(hit.text || "").slice(0, 900)
+    }));
+
+    const response = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {})
+      },
+      body: JSON.stringify({
+        model: this.model,
+        temperature: 0,
+        max_tokens: Math.min(Math.max(this.maxTokens || 512, 256), 1024),
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "You rerank local RAG chunks. Return only JSON: " +
+              "{\"ranking\":[{\"id\":\"chunk id\",\"score\":0.0}]} with the most useful evidence first. " +
+              "Score relevance to the question, the mode, and the agent purpose. Do not invent ids."
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              mode,
+              purpose,
+              query,
+              maxResults,
+              candidates
+            })
+          }
+        ]
+      })
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error?.message || payload.error || `LLM rerank HTTP ${response.status}`);
+    }
+
+    const content = payload.choices?.[0]?.message?.content || "{}";
+    const parsed = JSON.parse(content);
+    return {
+      ranking: Array.isArray(parsed.ranking) ? parsed.ranking : []
+    };
+  }
+}
+
+function agentPurposeText(envelope) {
+  const purpose = String(envelope?.agentPurpose || "").trim();
+  if (!purpose) return "";
+  return `Agent purpose:\n${purpose.slice(0, 1200)}\n\n`;
 }
 
 function redactUrl(url) {
