@@ -3,15 +3,21 @@ const MOJIBAKE_MARKERS = /[\u0080-\u009f]|[ÃÂ][\u0080-\u00bf]?|[íìêë][\u00
 export function normalizeUploadedFileName(name) {
   const value = String(name || "file");
   const percentDecoded = decodePercentEncodedName(value);
-  return decodeMojibakeName(percentDecoded);
+  // NFC composes macOS' decomposed (NFD) Hangul jamo back into 가-힣 syllables.
+  return decodeMojibakeName(percentDecoded).normalize("NFC");
 }
+
+// Allow Hangul syllables plus conjoining/compatibility jamo so decomposed Korean
+// filenames survive even if they weren't normalized upstream.
+const NAME_ALLOWED = /[^a-zA-Z0-9가-힣ᄀ-ᇿ㄰-㆏._ -]/g;
 
 export function sanitizeFileName(name) {
   const cleaned = String(name || "file")
+    .normalize("NFC")
     .replaceAll("\\", "/")
     .split("/")
     .filter(Boolean)
-    .map((part) => part.replace(/[^a-zA-Z0-9가-힣._ -]/g, "_").trim())
+    .map((part) => part.replace(NAME_ALLOWED, "_").trim())
     .filter(Boolean)
     .join("/");
   return cleaned || "file";
