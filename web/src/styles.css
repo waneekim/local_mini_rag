@@ -471,11 +471,14 @@ input:focus, select:focus, textarea:focus {
 .workspace-header h2 { font-size: 1.25rem; }
 
 .status-line {
-  flex: 0 0 auto;
-  max-width: 40%;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 240px;
   color: var(--muted);
   font-size: 0.85rem;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   text-align: right;
 }
 
@@ -1150,8 +1153,10 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-shrink: 0;
+  min-width: 0;
 }
+
+.workspace-header-right .icon-button { flex-shrink: 0; }
 
 .shell.compact .workspace-header { padding: 10px 16px; }
 .shell.compact .chat-messages { padding: 14px 14px 8px; }
