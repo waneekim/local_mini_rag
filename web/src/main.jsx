@@ -1488,7 +1488,7 @@ function App() {
         <div className="brand">
           <Database size={21} aria-hidden="true" />
           <div>
-            <h1>Profile RAG</h1>
+            <h1 title="Agent RAG Knowledge">ARK</h1>
             <p>{health?.llmProvider?.model || health?.llmProvider?.provider || "checking"}</p>
           </div>
           <button className="icon-button" type="button" title="설정" onClick={openSettings} style={{ marginLeft: "auto" }}>
