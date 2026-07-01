@@ -1146,6 +1146,13 @@ input:focus, select:focus, textarea:focus {
 .shell.compact .citations-panel,
 .shell.compact .chat-layout > .resizer { display: none; }
 
+.workspace-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .shell.compact .workspace-header { padding: 10px 16px; }
 .shell.compact .chat-messages { padding: 14px 14px 8px; }
 .shell.compact .chat-input-bar { padding: 8px 14px 12px; }
@@ -1159,4 +1166,9 @@ input:focus, select:focus, textarea:focus {
   .citations-panel { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
   .sidebar { width: 100%; height: auto; min-height: auto; overflow: visible; border-right: 0; border-bottom: 1px solid var(--line); }
   .resizer { display: none; }
+
+  /* compact must stay a fixed-height single column so the chat scrolls internally */
+  .shell.compact { flex-direction: row; height: 100vh; overflow: hidden; }
+  .shell.compact .workspace { height: 100vh; min-height: 0; }
+  .shell.compact .chat-layout { flex-direction: row; }
 }
