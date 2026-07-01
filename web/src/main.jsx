@@ -538,6 +538,21 @@ function App() {
     }
   }
 
+  // Chat-area drop: a screenshot image → vision-validate; other files → add as source.
+  async function onChatDrop(e) {
+    const files = [...(e.dataTransfer?.files || [])];
+    const images = files.filter((f) => f.type.startsWith("image/"));
+    if (images.length && images.length === files.length) {
+      e.preventDefault();
+      setChatDragOver(false);
+      const reader = new FileReader();
+      reader.onload = () => extractFromImage(reader.result);
+      reader.readAsDataURL(images[0]);
+      return;
+    }
+    await onDropFiles(e, activeProfileId);
+  }
+
   // Agent drop: a source drag copies the source; otherwise treat as file upload.
   async function onAgentDrop(e, targetPid) {
     const raw = e.dataTransfer.getData("application/x-rag-source");
@@ -1582,9 +1597,9 @@ function App() {
             className={`chat-main ${chatDragOver ? "drag" : ""}`}
             onDragOver={(e) => { e.preventDefault(); setChatDragOver(true); }}
             onDragLeave={(e) => { if (e.currentTarget === e.target) setChatDragOver(false); }}
-            onDrop={(e) => onDropFiles(e, activeProfileId)}
+            onDrop={onChatDrop}
           >
-            {chatDragOver && <div className="drop-overlay">여기에 놓으면 현재 Agent에 추가됩니다</div>}
+            {chatDragOver && <div className="drop-overlay">이미지=텍스트 검증 · 파일=소스로 추가</div>}
 
             <div className="chat-messages">
               {messages.length === 0 && (
