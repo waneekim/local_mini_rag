@@ -88,6 +88,7 @@ function App() {
   const uploadTargetRef = useRef("");
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+  const highlightRef = useRef(null);
 
   const activeProfile = useMemo(
     () => profiles.find((p) => p.id === activeProfileId),
@@ -1546,19 +1547,26 @@ function App() {
                     ))}
                   </div>
                 )}
-                <textarea
-                  ref={inputRef}
-                  value={query}
-                  onChange={onQueryChange}
-                  onKeyDown={handleKeyDown}
-                  placeholder={
-                    activeMode && chatMode !== "general"
-                      ? `[${activeMode.label}] ${activeMode.hint}`
-                      : "메시지 / @Agent / 명령 입력… (Enter 전송 · Shift+Enter 줄바꿈)"
-                  }
-                  disabled={busy}
-                  style={{ height: inputHeight }}
-                />
+                <div className="ta-wrap" style={{ height: inputHeight }}>
+                  <div className="ta-highlight" ref={highlightRef} aria-hidden="true">
+                    {renderInputHighlight(query, profiles)}
+                  </div>
+                  <textarea
+                    ref={inputRef}
+                    className="ta-input"
+                    value={query}
+                    onChange={onQueryChange}
+                    onKeyDown={handleKeyDown}
+                    onScroll={(e) => { if (highlightRef.current) highlightRef.current.scrollTop = e.currentTarget.scrollTop; }}
+                    placeholder={
+                      activeMode && chatMode !== "general"
+                        ? `[${activeMode.label}] ${activeMode.hint}`
+                        : "메시지 / @Agent / 명령 입력… (Enter 전송 · Shift+Enter 줄바꿈)"
+                    }
+                    disabled={busy}
+                    style={{ height: inputHeight }}
+                  />
+                </div>
                 <div className="composer-bar">
                   <div className="input-tools">
                     <button className="tool" type="button" title="파일 추가" onClick={() => pickFiles(activeProfileId)}><Upload size={16} /></button>
@@ -1708,6 +1716,38 @@ function escapeHtml(text) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+// Render the composer text with a leading /command and @Agent mentions shown as
+// banner pills. Pills use box-shadow (not padding) so character widths — and thus
+// the textarea caret — stay perfectly aligned with this overlay.
+function renderInputHighlight(text, profiles) {
+  if (!text) return null;
+  const nodes = [];
+  let rest = text;
+  let k = 0;
+  const cmd = rest.match(/^\/[^\s]*/);
+  if (cmd) {
+    nodes.push(<span key={`c${k++}`} className="cmd-pill">{cmd[0]}</span>);
+    rest = rest.slice(cmd[0].length);
+  }
+  const names = (profiles || []).map((p) => p.name).filter(Boolean).sort((a, b) => b.length - a.length);
+  if (names.length) {
+    const pattern = names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+    const re = new RegExp(`@(?:${pattern})`, "g");
+    let last = 0;
+    let m;
+    while ((m = re.exec(rest)) !== null) {
+      if (m.index > last) nodes.push(rest.slice(last, m.index));
+      nodes.push(<span key={`m${k++}`} className="mention-pill">{m[0]}</span>);
+      last = m.index + m[0].length;
+      if (re.lastIndex === m.index) re.lastIndex += 1;
+    }
+    nodes.push(rest.slice(last));
+  } else {
+    nodes.push(rest);
+  }
+  return nodes;
 }
 
 // Wrap query keywords (length >= 2) in <mark> within already-escaped text.

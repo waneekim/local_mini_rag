@@ -808,6 +808,52 @@ input:focus, select:focus, textarea:focus {
 
 .composer textarea:focus { box-shadow: none; }
 
+/* Command/mention banner overlay: a styled layer under a transparent-text
+   textarea. Metrics must match .composer textarea exactly. */
+.ta-wrap { position: relative; width: 100%; }
+
+.ta-highlight {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 12px 14px 4px;
+  font-family: inherit;
+  font-size: 0.93rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  color: var(--ink);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.composer textarea.ta-input {
+  position: relative;
+  z-index: 1;
+  color: transparent;
+  caret-color: var(--ink);
+  scrollbar-width: none;
+}
+
+.ta-input::-webkit-scrollbar { width: 0; height: 0; }
+.ta-input::placeholder { color: var(--muted); opacity: 1; }
+
+/* pills: box-shadow gives padding-look without changing glyph advance width */
+.cmd-pill {
+  border-radius: 4px;
+  background: #dbe6ff;
+  color: #2946a8;
+  box-shadow: 0 0 0 2px #dbe6ff;
+}
+
+.mention-pill {
+  border-radius: 4px;
+  background: #cdeae2;
+  color: var(--accent-dark);
+  box-shadow: 0 0 0 2px #cdeae2;
+}
+
 .composer-bar {
   display: flex;
   align-items: center;
