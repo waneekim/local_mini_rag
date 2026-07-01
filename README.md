@@ -17,6 +17,50 @@ npm run py:deps      # PDF/Word/Excel/PPT 추출용 Python 워커 의존성 (.ve
 
 ---
 
+## 다른 사람과 함께 쓰기 — 중앙 공유 RAG + 개인 로컬 RAG
+
+두 가지 방식을 **동시에** 지원합니다.
+
+1. **중앙 공유 RAG (호스트)** — 내 PC에서 서버를 띄우고, 내가 만든 에이전트를 **발행**하면
+   다른 디자이너가 내 IP로 접속해 **열람·대화**하거나 자기 PC로 **복제**할 수 있습니다.
+   중앙 에이전트의 수정·발행은 **관리자 암호(`ARK_ADMIN_TOKEN`)를 아는 나만** 할 수 있습니다.
+2. **개인 로컬 RAG** — 디자이너가 자기 PC에 이 앱을 설치·실행하면, 자기가 넣은 에이전트·소스는
+   **자기 로컬 `data/`(SQLite)에만** 저장됩니다. 중앙 서버로 나가지 않습니다.
+
+### A. 호스트(중앙 서버) 띄우기 — 내 자리
+
+```bash
+npm install
+npm run build                       # 웹 UI를 dist/client로 빌드 (API와 같은 포트에서 서빙)
+ARK_ADMIN_TOKEN=원하는암호 npm start   # http://0.0.0.0:8787 (같은 포트에서 UI+API)
+```
+
+- 접속 주소는 `http://<내-IP>:8787` 입니다. (같은 사내망/LAN에서 접근. 방화벽에서 **8787 포트 인바운드 허용**)
+- 내 IP 확인: macOS/Linux `ipconfig getifaddr en0` 또는 `hostname -I`.
+- `ARK_ADMIN_TOKEN`을 **설정하면** 읽기(열람·검색·대화·중앙 조회)는 누구나 가능하지만,
+  **모든 수정(에이전트/소스 추가·삭제·발행·설정 변경)은 관리자 암호가 있어야** 합니다.
+  설정하지 않으면 기존처럼 잠금 없이 동작합니다(개인 로컬용).
+- 에이전트를 공유하려면 UI ⚙️ → **중앙 라이브러리 → 발행**에서 **발행** 버튼을 누릅니다.
+  (관리자 암호를 넣어야 발행 버튼이 활성화됩니다: ⚙️ → 중앙 라이브러리 → 관리자 암호 → 인증)
+
+### B. 접속한 디자이너 — 두 가지 사용법
+
+**① 내 서버에 바로 접속해서 미리 만든 에이전트 쓰기**
+- 브라우저로 `http://<사장님-IP>:8787` 접속 → 발행된 중앙 에이전트를 **열람·대화**.
+- 수정은 막혀 있고(관리자 전용), 그대로 대화만 하거나 아래 ②로 복제해서 씁니다.
+
+**② 자기 PC에서 자기 에이전트를 만들어 로컬 저장**
+- 디자이너도 이 저장소를 받아 `npm install && npm run build && npm start` (암호 없이 실행 → 완전 개인용).
+- 자기 에이전트·소스는 자기 `data/`에만 저장됩니다.
+- 필요하면 ⚙️ → **중앙 라이브러리 → 중앙에서 가져오기**에 `http://<사장님-IP>:8787`을 넣고
+  **불러오기** → 원하는 중앙 에이전트 옆 **복제** 를 누르면, 임베딩까지 통째로 **내 로컬로 복제**됩니다.
+  (내 임베딩 모델이 중앙과 다르면 청크 텍스트로 **자동 재임베딩**하여 검색이 깨지지 않습니다.)
+
+> 임베딩 정합성: 중앙과 로컬의 임베딩 백엔드·모델이 같으면 벡터를 그대로 복사(빠름), 다르면
+> 로컬 임베딩 모델로 재임베딩합니다. 팀에서 같은 임베딩 프리셋을 쓰면 가장 매끄럽습니다.
+
+---
+
 ## 1. 연결 설정 — LM Studio & 프리셋
 
 좌측 상단 ⚙️ → **연결 설정**. LLM과 임베딩 서버를 따로 지정하고, **이름 붙은 프리셋**으로
@@ -188,6 +232,12 @@ npm run py:deps      # PDF/Word/Excel/PPT 추출용 Python 워커 의존성 (.ve
 대화·검색
 - `POST /api/profiles/:id/search` · `/context` · `/chat`  (`chat` 본문에 `mode` 지정)
 
+중앙 라이브러리(공유 RAG)·인증
+- `GET /api/auth` (관리자 필요 여부) · `POST /api/auth/verify`
+- `POST /api/profiles/:id/publish` (`{ published }`, 관리자)
+- `GET /api/central/profiles` (발행된 목록) · `GET /api/central/profiles/:id/export`
+- `POST /api/central/browse` (`{ remoteUrl }`) · `POST /api/central/import` (`{ remoteUrl, profileId, newName? }`)
+
 설정·모드·스킬
 - `GET/PUT /api/settings` · `POST /api/settings/select` · `DELETE /api/settings/:name`
 - `GET/PUT /api/modes` · `DELETE /api/modes/:key`
@@ -214,5 +264,8 @@ LLM_MAX_TOKENS=1024
 EMBEDDINGS_URL=http://localhost:1234/v1/embeddings
 EMBEDDINGS_MODEL=text-embedding-bge-m3
 RAG_EMBEDDING_DIMENSIONS=1024
+# 중앙 공유 서버로 쓸 때: 설정하면 읽기는 공개, 모든 수정은 이 암호 필요 (개인 로컬이면 비워둠)
+# ARK_ADMIN_TOKEN=원하는암호
+# HOST, PORT (기본 0.0.0.0:8787), CORS_ORIGIN
 # RAG_MAX_FILE_BYTES, RAG_MAX_FILES, SKILLS_REPO, SKILL_TIMEOUT_MS, RAG_URL_TIMEOUT_MS
 ```

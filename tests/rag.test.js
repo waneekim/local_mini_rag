@@ -101,6 +101,98 @@ test("profile text sources can be indexed, searched, and isolated", async () => 
   }
 });
 
+test("central library: publish, export, and import into a second instance", async () => {
+  const hostDir = await mkdtemp(join(tmpdir(), "rag-host-"));
+  const localDir = await mkdtemp(join(tmpdir(), "rag-local-"));
+  const mockLlm = {
+    describe: () => ({ provider: "test", model: "mock" }),
+    generate: async ({ envelope }) => ({
+      answer: `answer with ${envelope.citations.length} citations`,
+      provider: { provider: "test", model: "mock" },
+      raw: {}
+    })
+  };
+  const host = await createApp({ dataDir: hostDir, logger: false, cleanupDataDir: true, llmProvider: mockLlm });
+  const local = await createApp({ dataDir: localDir, logger: false, cleanupDataDir: true, llmProvider: mockLlm });
+
+  try {
+    const hostBase = await host.listen({ host: "127.0.0.1", port: 0 });
+
+    const shared = await post(host, "/api/profiles", { name: "가이드" });
+    await post(host, `/api/profiles/${shared.id}/sources/text`, {
+      title: "환불 정책",
+      text: "고객 환불 정책은 구매 후 7일 이내에 처리됩니다. 영수증이 필요합니다."
+    });
+    const job = await post(host, `/api/profiles/${shared.id}/index`, {});
+    await waitForJob(host, job.id);
+
+    // Not published yet -> absent from the central list and export is refused.
+    assert.equal((await get(host, "/api/central/profiles")).length, 0);
+
+    await post(host, `/api/profiles/${shared.id}/publish`, { published: true });
+    const central = await get(host, "/api/central/profiles");
+    assert.equal(central.length, 1);
+    assert.equal(central[0].name, "가이드");
+    assert.equal(central[0].chunkCount > 0, true);
+
+    // Local instance browses + imports the published agent from the host.
+    const browsed = await post(local, "/api/central/browse", { remoteUrl: hostBase });
+    assert.equal(browsed.profiles[0].id, shared.id);
+
+    const imported = await post(local, "/api/central/import", { remoteUrl: hostBase, profileId: shared.id });
+    assert.equal(imported.reembedded, false); // same local-ngram vector space
+    assert.equal(imported.chunks > 0, true);
+
+    const localProfiles = await get(local, "/api/profiles");
+    assert.equal(localProfiles.length, 1);
+
+    const search = await post(local, `/api/profiles/${imported.profile.id}/search`, { query: "환불은 언제 되나요?" });
+    assert.equal(search.hits.length > 0, true);
+    assert.equal(search.hits[0].title, "환불 정책");
+  } finally {
+    await host.close();
+    await local.close();
+  }
+});
+
+test("admin token gates mutations but leaves reads open", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-admin-"));
+  process.env.ARK_ADMIN_TOKEN = "s3cret";
+  try {
+    const app = await createApp({ dataDir, logger: false, cleanupDataDir: true });
+    try {
+      const open = await app.inject({ method: "GET", url: "/api/profiles" });
+      assert.equal(open.statusCode, 200);
+
+      const blocked = await app.inject({
+        method: "POST",
+        url: "/api/profiles",
+        payload: { name: "nope" },
+        headers: { "content-type": "application/json" }
+      });
+      assert.equal(blocked.statusCode, 401);
+
+      const allowed = await app.inject({
+        method: "POST",
+        url: "/api/profiles",
+        payload: { name: "ok" },
+        headers: { "content-type": "application/json", "x-ark-admin": "s3cret" }
+      });
+      assert.equal(allowed.statusCode, 201);
+    } finally {
+      await app.close();
+    }
+  } finally {
+    delete process.env.ARK_ADMIN_TOKEN;
+  }
+});
+
+async function get(app, url) {
+  const response = await app.inject({ method: "GET", url });
+  assert.equal(response.statusCode < 300, true, response.body);
+  return response.json();
+}
+
 async function post(app, url, body) {
   const response = await app.inject({
     method: "POST",
