@@ -7,6 +7,7 @@ import { EmbeddingService } from "./embedding.js";
 import { hashFile, hashText } from "./hash.js";
 import { id, nowIso } from "./ids.js";
 import { CHAT_MODES, LlmProvider } from "./llmProvider.js";
+import { extractTextFromImage } from "./vision.js";
 import { basenameFromRelative, normalizeUploadedFileName, sanitizeFileName } from "./sanitize.js";
 import { chunkDocuments } from "./chunking.js";
 import { cosineSimilarity, lexicalScore } from "./vectorMath.js";
@@ -80,6 +81,11 @@ class RagService {
 
   listProfiles() {
     return all(this.db, "SELECT * FROM profiles ORDER BY updated_at DESC");
+  }
+
+  async visionExtract(image) {
+    const llm = this.settingsStore?.get()?.llm || {};
+    return extractTextFromImage(image, { llm });
   }
 
   async createProfile(input) {

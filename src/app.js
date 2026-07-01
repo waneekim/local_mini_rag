@@ -26,6 +26,17 @@ export async function createApp(options = {}) {
     bodyLimit: 25 * 1024 * 1024
   });
 
+  // CORS so external origins (e.g. a Figma plugin) can call the API.
+  const corsOrigin = process.env.CORS_ORIGIN || "*";
+  app.addHook("onRequest", async (request, reply) => {
+    reply.header("access-control-allow-origin", corsOrigin);
+    reply.header("access-control-allow-methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+    reply.header("access-control-allow-headers", "content-type,authorization");
+    if (request.method === "OPTIONS") {
+      reply.code(204).send();
+    }
+  });
+
   await app.register(multipart, {
     limits: {
       fileSize: Number(process.env.RAG_MAX_FILE_BYTES || 100 * 1024 * 1024),
@@ -171,6 +182,24 @@ export async function createApp(options = {}) {
 
   app.post("/api/profiles/:profileId/chat", async (request) => {
     return rag.chat(request.params.profileId, request.body || {});
+  });
+
+  // Stable surface for external tools (Figma plugin): validate text against a
+  // profile's guidelines. Defaults to compliance (규율) mode.
+  app.post("/api/validate", async (request, reply) => {
+    const body = request.body || {};
+    if (!body.profileId) return reply.code(400).send({ error: "profileId is required" });
+    return rag.chat(body.profileId, {
+      query: String(body.text || ""),
+      mode: body.mode || "compliance",
+      topK: body.topK
+    });
+  });
+
+  // Extract text from an image (screenshot crop) via the configured vision LLM.
+  app.post("/api/vision/extract", async (request) => {
+    const text = await rag.visionExtract(request.body?.image || "");
+    return { text };
   });
 
   const clientDir = join(projectRoot, "dist", "client");

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Bot,
+  Camera,
   ChevronDown,
   ChevronRight,
   Database,
@@ -62,6 +63,9 @@ function App() {
   const [suggest, setSuggest] = useState(null); // { type:"mention"|"command", items, index }
   const [autoIndex, setAutoIndex] = useState(() => localStorage.getItem("rag.autoIndex") === "1");
   const [editingMode, setEditingMode] = useState(null); // mode being edited/created in settings
+  const [crop, setCrop] = useState(null); // { src, w, h } captured screenshot to crop
+  const [dragRect, setDragRect] = useState(null); // selection rect in client coords
+  const compact = useMemo(() => new URLSearchParams(window.location.search).get("compact") === "1", []);
 
   const [editingId, setEditingId] = useState("");
   const [editingName, setEditingName] = useState("");
@@ -89,6 +93,8 @@ function App() {
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const highlightRef = useRef(null);
+  const cropImgRef = useRef(null);
+  const dragStartRef = useRef(null);
 
   const activeProfile = useMemo(
     () => profiles.find((p) => p.id === activeProfileId),
@@ -140,7 +146,7 @@ function App() {
 
   useEffect(() => {
     function onClick() { setMenu(null); }
-    function onKey(e) { if (e.key === "Escape") { setMenu(null); setTextDialog(null); setUrlDialog(null); } }
+    function onKey(e) { if (e.key === "Escape") { setMenu(null); setTextDialog(null); setUrlDialog(null); setCrop(null); setDragRect(null); } }
     window.addEventListener("click", onClick);
     window.addEventListener("keydown", onKey);
     return () => {
@@ -349,6 +355,105 @@ function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  // ── Screenshot → Vision LLM → prompt ──
+
+  async function extractFromImage(dataUrl) {
+    setBusy(true);
+    setStatus("이미지에서 텍스트 추출 중…");
+    try {
+      const { text } = await fetchJson("/api/vision/extract", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ image: dataUrl })
+      });
+      if (text) {
+        setQuery((q) => (q ? `${q}\n${text}` : text));
+        setStatus("텍스트 추출됨 · 검토 후 전송");
+        setTimeout(() => inputRef.current?.focus(), 0);
+      } else {
+        setStatus("추출된 텍스트가 없습니다");
+      }
+    } catch (e) {
+      window.alert(`텍스트 추출 오류: ${e.message}`);
+      setStatus("추출 오류");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function captureScreenshot() {
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      window.alert("이 브라우저는 화면 캡처를 지원하지 않습니다. 대신 스크린샷을 복사해 붙여넣으세요(⌘V).");
+      return;
+    }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    } catch {
+      return; // user cancelled
+    }
+    const video = document.createElement("video");
+    video.srcObject = stream;
+    await video.play();
+    const w = video.videoWidth;
+    const h = video.videoHeight;
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    canvas.getContext("2d").drawImage(video, 0, 0, w, h);
+    stream.getTracks().forEach((t) => t.stop());
+    setCrop({ src: canvas.toDataURL("image/png"), w, h });
+  }
+
+  function onCropDown(e) {
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
+    setDragRect({ x: e.clientX, y: e.clientY, w: 0, h: 0 });
+  }
+
+  function onCropMove(e) {
+    const s = dragStartRef.current;
+    if (!s) return;
+    setDragRect({ x: Math.min(s.x, e.clientX), y: Math.min(s.y, e.clientY), w: Math.abs(e.clientX - s.x), h: Math.abs(e.clientY - s.y) });
+  }
+
+  async function onCropUp() {
+    const rect = dragRect;
+    dragStartRef.current = null;
+    if (!rect || rect.w < 5 || rect.h < 5 || !cropImgRef.current) {
+      setDragRect(null);
+      return;
+    }
+    const b = cropImgRef.current.getBoundingClientRect();
+    const scaleX = crop.w / b.width;
+    const scaleY = crop.h / b.height;
+    const sx = Math.max(0, (rect.x - b.left) * scaleX);
+    const sy = Math.max(0, (rect.y - b.top) * scaleY);
+    const sw = Math.min(crop.w - sx, rect.w * scaleX);
+    const sh = Math.min(crop.h - sy, rect.h * scaleY);
+    const src = crop.src;
+    setDragRect(null);
+    setCrop(null);
+    const img = new Image();
+    img.src = src;
+    await img.decode();
+    const c = document.createElement("canvas");
+    c.width = Math.round(sw);
+    c.height = Math.round(sh);
+    c.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+    await extractFromImage(c.toDataURL("image/png"));
+  }
+
+  function onComposerPaste(e) {
+    const item = [...(e.clipboardData?.items || [])].find((it) => it.type.startsWith("image/"));
+    if (!item) return;
+    e.preventDefault();
+    const file = item.getAsFile();
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => extractFromImage(reader.result);
+    reader.readAsDataURL(file);
   }
 
   function toggleAutoIndex(value) {
@@ -1095,7 +1200,18 @@ function App() {
   }
 
   return (
-    <main className="shell" style={{ "--sidebar-w": `${sidebarWidth}px`, "--citations-w": `${citationsWidth}px` }}>
+    <main className={`shell ${compact ? "compact" : ""}`} style={{ "--sidebar-w": `${sidebarWidth}px`, "--citations-w": `${citationsWidth}px` }}>
+      {/* Screenshot crop overlay */}
+      {crop && (
+        <div className="crop-overlay" onMouseDown={onCropDown} onMouseMove={onCropMove} onMouseUp={onCropUp}>
+          <img ref={cropImgRef} src={crop.src} className="crop-img" draggable={false} alt="screenshot" />
+          {dragRect && (
+            <div className="crop-sel" style={{ left: dragRect.x, top: dragRect.y, width: dragRect.w, height: dragRect.h }} />
+          )}
+          <div className="crop-hint">드래그해서 검증할 영역을 선택하세요 · Esc 취소</div>
+        </div>
+      )}
+
       {/* Hidden file inputs */}
       <input ref={fileInputRef} type="file" multiple hidden accept={ACCEPTED_FILE_TYPES} onChange={(e) => uploadEntries(fileListToEntries(e.target.files), uploadTargetRef.current)} />
       <input ref={folderInputRef} type="file" multiple hidden webkitdirectory="" directory="" onChange={(e) => uploadEntries(fileListToEntries(e.target.files), uploadTargetRef.current)} />
@@ -1217,6 +1333,7 @@ function App() {
               <div className="settings-grid">
                 <label>서버 URL<input value={settingsForm.llm.baseUrl || ""} onChange={(e) => setLlmField("baseUrl", e.target.value)} placeholder="http://localhost:1234/v1" /></label>
                 <label>모델명<input value={settingsForm.llm.model || ""} onChange={(e) => setLlmField("model", e.target.value)} placeholder="qwen2.5-14b-instruct" /></label>
+                <label>비전 모델 <span className="optional">(스크린샷 검증용 · 선택)</span><input value={settingsForm.llm.visionModel || ""} onChange={(e) => setLlmField("visionModel", e.target.value)} placeholder="qwen2-vl-7b-instruct" /></label>
                 <label>API Key <span className="optional">(선택)</span><input type="password" value={settingsForm.llm.apiKey || ""} onChange={(e) => setLlmField("apiKey", e.target.value)} placeholder="없으면 비워두세요" /></label>
               </div>
             </div>
@@ -1557,6 +1674,7 @@ function App() {
                     value={query}
                     onChange={onQueryChange}
                     onKeyDown={handleKeyDown}
+                    onPaste={onComposerPaste}
                     onScroll={(e) => { if (highlightRef.current) highlightRef.current.scrollTop = e.currentTarget.scrollTop; }}
                     placeholder={
                       activeMode && chatMode !== "general"
@@ -1573,6 +1691,7 @@ function App() {
                     <button className="tool" type="button" title="폴더 추가" onClick={() => pickFolder(activeProfileId)}><FolderUp size={16} /></button>
                     <button className="tool" type="button" title="텍스트 추가" onClick={() => openTextDialog(activeProfileId)}><FileText size={16} /></button>
                     <button className="tool" type="button" title="URL 추가" onClick={() => openUrlDialog(activeProfileId)}><Link size={16} /></button>
+                    <button className="tool" type="button" title="스크린샷 검증 (영역 선택 → 텍스트 추출)" onClick={captureScreenshot}><Camera size={16} /></button>
                     <span className="tool-sep" />
                     <button
                       className={`tool toggle ${autoIndex ? "on" : ""}`}
@@ -1769,7 +1888,7 @@ function highlightTerms(escapedText, query) {
 async function fetchJson(url, options) {
   const response = await fetch(`${API}${url}`, options);
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  if (!response.ok) throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
   return payload;
 }
 
