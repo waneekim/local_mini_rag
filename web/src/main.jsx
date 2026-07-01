@@ -67,15 +67,17 @@ function App() {
   const [editingMode, setEditingMode] = useState(null); // mode being edited/created in settings
   const [crop, setCrop] = useState(null); // { src, w, h } captured screenshot to crop
   const [dragRect, setDragRect] = useState(null); // selection rect in client coords
-  const [compact, setCompact] = useState(() => {
+  const [manualCompact, setManualCompact] = useState(() => {
     const p = new URLSearchParams(window.location.search).get("compact");
     if (p === "1") return true;
     if (p === "0") return false;
     return localStorage.getItem("rag.compact") === "1";
   });
+  const [narrow, setNarrow] = useState(() => window.innerWidth < 900);
+  const compact = manualCompact || narrow; // a narrow window auto-compacts
 
   function toggleCompact() {
-    setCompact((v) => {
+    setManualCompact((v) => {
       const next = !v;
       localStorage.setItem("rag.compact", next ? "1" : "0");
       const url = new URL(window.location.href);
@@ -150,6 +152,12 @@ function App() {
   }, [modes, skills]);
 
   useEffect(() => { boot(); }, []);
+
+  useEffect(() => {
+    function onResize() { setNarrow(window.innerWidth < 900); }
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -1614,9 +1622,11 @@ function App() {
             {compact && (
               <button className="icon-button" type="button" title="설정" onClick={openSettings}><Settings size={16} /></button>
             )}
-            <button className="icon-button" type="button" title={compact ? "확장 모드" : "컴팩트 모드"} onClick={toggleCompact}>
-              {compact ? <Maximize2 size={16} /> : <Minimize2 size={16} />}
-            </button>
+            {!narrow && (
+              <button className="icon-button" type="button" title={compact ? "확장 모드" : "컴팩트 모드"} onClick={toggleCompact}>
+                {compact ? <Maximize2 size={16} /> : <Minimize2 size={16} />}
+              </button>
+            )}
           </div>
         </header>
 
