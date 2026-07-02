@@ -82,6 +82,41 @@ test("parseJsonObject accepts objects/JSON and rejects junk", () => {
   assert.deepEqual(parseJsonObject("not json"), {});
 });
 
+test("qwen3 embedding instructs the query but leaves passages raw", async () => {
+  const bodies = [];
+  const make = () =>
+    new EmbeddingService({
+      backend: "http",
+      embeddingsUrl: "http://embed.local/v1/embeddings",
+      model: "qwen3-embedding-4b",
+      fetchFn: async (url, options) => {
+        bodies.push(JSON.parse(options.body));
+        return { ok: true, json: async () => ({ data: [{ index: 0, embedding: [1, 0] }] }) };
+      }
+    });
+
+  await make().embed(["환불 규정 알려줘"], { mode: "query" });
+  await make().embed(["환불은 7일 이내 처리됩니다."], { mode: "passage" });
+
+  assert.match(bodies[0].input[0], /^Instruct: .+\nQuery: 환불 규정 알려줘$/);
+  assert.equal(bodies[1].input[0], "환불은 7일 이내 처리됩니다."); // passage stays raw
+});
+
+test("non-instruct embedding models leave query text unchanged", async () => {
+  const bodies = [];
+  const service = new EmbeddingService({
+    backend: "http",
+    embeddingsUrl: "http://embed.local/v1/embeddings",
+    model: "bge-m3",
+    fetchFn: async (url, options) => {
+      bodies.push(JSON.parse(options.body));
+      return { ok: true, json: async () => ({ data: [{ index: 0, embedding: [1, 0] }] }) };
+    }
+  });
+  await service.embed(["hello"], { mode: "query" });
+  assert.equal(bodies[0].input[0], "hello");
+});
+
 test("uploaded Korean filenames survive multipart mojibake", () => {
   const original = "자료/한글파일 이름.xlsx";
   const mojibake = Buffer.from(original, "utf8").toString("latin1");
