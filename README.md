@@ -261,10 +261,13 @@ ARK_ADMIN_TOKEN=원하는암호 npm start   # http://0.0.0.0:8787 (같은 포트
 않도록 브라우저에서 입력).
 
 ```env
+# 채팅은 {LLM_BASE_URL}/chat/completions 로 호출 → base URL에 /v1 까지 포함해야 함(누락 시 404)
 LLM_BASE_URL=http://localhost:1234/v1
 LLM_MODEL=qwen2.5-7b-instruct
 VISION_MODEL=            # 비전(스크린샷) 분석용 모델 id · LLM이 비전 겸용이면 LLM_MODEL과 동일
 LLM_MAX_TOKENS=1024
+# 요청 최상위로 병합되는 추가 필드(openai extra_body 상당). vLLM thinking 끄기 예:
+# LLM_EXTRA_BODY={"chat_template_kwargs":{"enable_thinking":false}}
 EMBEDDINGS_URL=http://localhost:1234/v1/embeddings
 EMBEDDINGS_MODEL=text-embedding-bge-m3
 RAG_EMBEDDING_DIMENSIONS=1024

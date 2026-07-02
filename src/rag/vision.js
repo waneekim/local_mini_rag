@@ -1,3 +1,5 @@
+import { parseJsonObject } from "./llmProvider.js";
+
 const EXTRACT_PROMPT =
   "You are an OCR engine for UI screenshots. Output ONLY the exact text visible in the image, " +
   "preserving line breaks and order. Do not translate, summarize, describe, or add anything. " +
@@ -30,6 +32,7 @@ export async function extractTextFromImage(image, { llm } = {}) {
     body: JSON.stringify({
       model,
       temperature: 0,
+      ...parseJsonObject(llm?.extraBody ?? process.env.LLM_EXTRA_BODY),
       messages: [
         { role: "system", content: EXTRACT_PROMPT },
         {
