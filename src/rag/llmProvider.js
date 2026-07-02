@@ -78,6 +78,31 @@ export class LlmProvider {
     };
   }
 
+  // Plain system+user completion (no RAG envelope). Used by the LLM reranker.
+  // Returns the assistant text, or "" for the mock/unconfigured provider.
+  async complete({ system, user, temperature = 0 }) {
+    if (this.provider !== "openai-compatible" || !this.baseUrl || !this.model) return "";
+    const response = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {})
+      },
+      body: JSON.stringify({
+        model: this.model,
+        temperature,
+        ...this.extraBody,
+        messages: [
+          ...(system ? [{ role: "system", content: system }] : []),
+          { role: "user", content: user }
+        ]
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error?.message || payload.error || `LLM HTTP ${response.status}`);
+    return payload.choices?.[0]?.message?.content?.trim() || "";
+  }
+
   async generate({ query, messages = [], envelope, system }) {
     if (this.provider === "mock") return this.mockGenerate({ query, envelope });
     if (this.provider !== "openai-compatible") throw new Error(`Unsupported LLM provider: ${this.provider}`);

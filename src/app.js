@@ -77,7 +77,8 @@ export async function createApp(options = {}) {
     llmProvider: options.llmProvider,
     pythonCommand: options.pythonCommand,
     settingsStore,
-    modeStore
+    modeStore,
+    reranker: options.reranker
   });
 
   app.decorate("rag", rag);
@@ -87,7 +88,8 @@ export async function createApp(options = {}) {
     server: "local-agent-profile-rag",
     dataDir,
     llmProvider: rag.llm.describe(),
-    embedding: rag.embeddings.describe()
+    embedding: rag.embeddings.describe(),
+    reranker: rag.reranker.describe()
   }));
 
   app.get("/api/modes", async () => modeStore.list());

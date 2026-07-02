@@ -12,6 +12,7 @@ import { basenameFromRelative, normalizeUploadedFileName, sanitizeFileName } fro
 import { chunkDocuments } from "./chunking.js";
 import { cosineSimilarity, lexicalScore } from "./vectorMath.js";
 import { WorkerClient } from "./workerClient.js";
+import { RerankService } from "./rerank.js";
 
 const DEFAULT_TOP_K = 8;
 
@@ -20,7 +21,7 @@ export function createRagService(options) {
 }
 
 class RagService {
-  constructor({ db, dataDir, projectRoot, logger, llmProvider, pythonCommand, settingsStore, modeStore }) {
+  constructor({ db, dataDir, projectRoot, logger, llmProvider, pythonCommand, settingsStore, modeStore, reranker }) {
     this.db = db;
     this.dataDir = dataDir;
     this.logger = logger;
@@ -29,6 +30,7 @@ class RagService {
     this.settingsStore = settingsStore;
     this.modeStore = modeStore;
     this.worker = new WorkerClient({ projectRoot, pythonCommand });
+    this.reranker = reranker || new RerankService();
 
     if (llmProvider) {
       this.llm = llmProvider;
@@ -738,12 +740,38 @@ class RagService {
       .filter((hit) => hit.score > 0 && hit.score >= minScore)
       .sort((a, b) => b.score - a.score);
 
+    const reranked = await this.maybeRerank(query, scored);
+
     return {
       profileId,
       query,
       topK,
-      hits: diversify(scored, topK)
+      reranked: reranked !== scored,
+      hits: diversify(reranked, topK)
     };
+  }
+
+  // Re-score the top embedding candidates with the precision reranker (if
+  // configured). Falls back to the embedding order on any error so search
+  // never fails because of the reranker.
+  async maybeRerank(query, scored) {
+    if (!this.reranker?.enabled || scored.length < 2) return scored;
+    const pool = scored.slice(0, this.reranker.candidates);
+    try {
+      const apiKey = this.settingsStore?.get()?.llm?.apiKey || process.env.LLM_API_KEY || "";
+      const results = await this.reranker.rerank(query, pool.map((hit) => hit.text), { llm: this.llm, apiKey });
+      const min = this.reranker.minScore;
+      const rescored = results
+        .filter((r) => pool[r.index])
+        .map((r) => ({ ...pool[r.index], rerankScore: Number(r.score.toFixed(6)), score: Number(r.score.toFixed(6)) }))
+        .filter((hit) => min == null || hit.score >= min)
+        .sort((a, b) => b.score - a.score);
+      // If the reranker dropped everything (e.g. all below min), keep embeddings.
+      return rescored.length ? rescored : scored;
+    } catch (error) {
+      this.logger?.warn?.(`rerank failed, using embedding order: ${error.message}`);
+      return scored;
+    }
   }
 
   async buildContext(profileId, input) {
