@@ -365,6 +365,58 @@ test("preprocess agent: structure a source, review-edit it, then index the Markd
   }
 });
 
+test("preprocess auto-approve structures and indexes in one pass (no review stop)", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-auto-"));
+  const generated = "# 환불 정책\n\n환불은 구매 후 7일 이내에 처리됩니다.";
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      complete: async () => generated,
+      generate: async ({ envelope }) => ({ answer: `ok ${envelope.citations.length}`, provider: {}, raw: {} })
+    }
+  });
+
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    await post(app, `/api/profiles/${p.id}/sources/text`, { title: "환불", text: "환불 7일 이내" });
+
+    // autoIndex=true: no separate index job, the source is indexed straight away.
+    const job = await post(app, `/api/profiles/${p.id}/preprocess`, { autoIndex: true });
+    await waitForJob(app, job.id);
+
+    const sources = await get(app, `/api/profiles/${p.id}/sources`);
+    assert.equal(sources[0].status, "indexed");
+    assert.equal(sources[0].normalized_md, generated);
+    assert.equal(sources[0].chunkCount > 0, true);
+
+    const search = await post(app, `/api/profiles/${p.id}/search`, { query: "환불은 언제 되나요?" });
+    assert.equal(search.hits.length > 0, true);
+  } finally {
+    await app.close();
+  }
+});
+
+test("source raw endpoint returns the original pasted text", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-raw-"));
+  const app = await createApp({ dataDir, logger: false, cleanupDataDir: true });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    const src = await post(app, `/api/profiles/${p.id}/sources/text`, { title: "메모", text: "원본 텍스트 내용" });
+    const res = await app.inject({ method: "GET", url: `/api/profiles/${p.id}/sources/${src.id}/raw` });
+    assert.equal(res.statusCode, 200);
+    assert.match(res.headers["content-type"], /text\/plain/);
+    assert.equal(res.body, "원본 텍스트 내용");
+
+    const missing = await app.inject({ method: "GET", url: `/api/profiles/${p.id}/sources/nope/raw` });
+    assert.equal(missing.statusCode, 404);
+  } finally {
+    await app.close();
+  }
+});
+
 test("central library: publish, export, and import into a second instance", async () => {
   const hostDir = await mkdtemp(join(tmpdir(), "rag-host-"));
   const localDir = await mkdtemp(join(tmpdir(), "rag-local-"));

@@ -2,7 +2,7 @@ import "./env/loadEnv.js";
 import Fastify from "fastify";
 import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
-import { existsSync } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -187,6 +187,18 @@ export async function createApp(options = {}) {
 
   app.delete("/api/profiles/:profileId/sources/:sourceId", async (request) => {
     return rag.deleteSource(request.params.profileId, request.params.sourceId);
+  });
+
+  // Open a source's original content (double-click in the tree): stream the
+  // uploaded file, redirect to the external URL, or return the pasted text.
+  app.get("/api/profiles/:profileId/sources/:sourceId/raw", async (request, reply) => {
+    const target = rag.getSourceFile(request.params.profileId, request.params.sourceId);
+    if (target.kind === "url") return reply.redirect(target.url);
+    if (target.kind === "text") {
+      return reply.type("text/plain; charset=utf-8").send(target.text);
+    }
+    reply.header("content-disposition", `inline; filename*=UTF-8''${encodeURIComponent(target.fileName)}`);
+    return reply.type(target.mimeType).send(createReadStream(target.filePath));
   });
 
   // Preprocessing agent: structure sources into reviewable Markdown before indexing.

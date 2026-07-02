@@ -72,6 +72,8 @@ function App() {
   const [agentFilter, setAgentFilter] = useState("");
   const [suggest, setSuggest] = useState(null); // { type:"mention"|"command", items, index }
   const [autoIndex, setAutoIndex] = useState(() => localStorage.getItem("rag.autoIndex") === "1");
+  // Preprocess auto-approve: structure straight into indexing, skipping review.
+  const [autoApprove, setAutoApprove] = useState(() => localStorage.getItem("rag.autoApprove") === "1");
   const [editingMode, setEditingMode] = useState(null); // mode being edited/created in settings
   const [crop, setCrop] = useState(null); // { src, w, h } captured screenshot to crop
   const [dragRect, setDragRect] = useState(null); // selection rect in client coords
@@ -174,6 +176,7 @@ function App() {
       { cmd: "no-embed-list", desc: "임베딩 안 된 소스" },
       { cmd: "types", desc: "임베딩 가능한 파일 형식" },
       { cmd: "autoindex", desc: "추가 시 자동 임베딩 켜기/끄기" },
+      { cmd: "autoapprove", desc: "전처리 자동 승인(검토 없이 색인) 켜기/끄기" },
       { cmd: "skills", desc: "설치된 스킬 목록" },
       { cmd: "help", desc: "도움말" }
     ];
@@ -748,15 +751,27 @@ function App() {
   // Run the structuring (preprocessing) agent over sources: extract meaning and
   // rebuild them as clean Markdown for review before indexing. Reuses the shared
   // job poller, which reloads sources when the job finishes.
-  async function structureSources(sourceIds, pid) {
+  async function structureSources(sourceIds, pid, { autoIndex: forceAuto } = {}) {
     if (!sourceIds.length) return;
+    const auto = forceAuto ?? autoApprove;
     const payload = await fetchJson(`/api/profiles/${pid}/preprocess`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sourceIds })
+      body: JSON.stringify({ sourceIds, autoIndex: auto })
     });
     setJob(payload);
-    setStatus(`구조화(전처리) 중 (${sourceIds.length}개)`);
+    setStatus(`구조화(전처리)${auto ? " · 자동 색인" : ""} 중 (${sourceIds.length}개)`);
+  }
+
+  function toggleAutoApprove(value) {
+    const next = typeof value === "boolean" ? value : !autoApprove;
+    setAutoApprove(next);
+    localStorage.setItem("rag.autoApprove", next ? "1" : "0");
+  }
+
+  // Open a source's original content in a new tab (double-click in the tree).
+  function openSourceRaw(source) {
+    window.open(`/api/profiles/${source.profile_id}/sources/${source.id}/raw`, "_blank", "noopener");
   }
 
   // Open the review editor with the source's current structured Markdown.
@@ -980,6 +995,13 @@ function App() {
       const on = /^(on|true|1|켜|켜기)$/i.test(rest) ? true : /^(off|false|0|꺼|끄기)$/i.test(rest) ? false : !autoIndex;
       toggleAutoIndex(on);
       pushSystem(`소스 추가 시 자동 임베딩: ${on ? "켜짐 ✅" : "꺼짐"}`);
+      return;
+    }
+
+    if (cmd === "autoapprove" || cmd === "auto-approve") {
+      const on = /^(on|true|1|켜|켜기)$/i.test(rest) ? true : /^(off|false|0|꺼|끄기)$/i.test(rest) ? false : !autoApprove;
+      toggleAutoApprove(on);
+      pushSystem(`전처리 자동 승인(검토 없이 바로 색인): ${on ? "켜짐 ✅" : "꺼짐"}`);
       return;
     }
 
@@ -1497,8 +1519,9 @@ function App() {
           <div
             key={source.id}
             className={`tree-row file status-${source.status}`}
-            title={`${source.relative_path || source.title} · ${statusLabel(source.status)} · 드래그해서 다른 Agent로 복사`}
+            title={`${source.relative_path || source.title} · ${statusLabel(source.status)} · 더블클릭: 원본 열기 · 드래그해서 다른 Agent로 복사`}
             draggable
+            onDoubleClick={() => openSourceRaw(source)}
             onDragStart={(e) => {
               e.stopPropagation();
               e.dataTransfer.setData("application/x-rag-source", JSON.stringify({ sourceId: source.id, fromProfileId: pid }));
@@ -2296,6 +2319,14 @@ function App() {
                       onClick={() => toggleAutoIndex()}
                     >
                       <Zap size={16} />
+                    </button>
+                    <button
+                      className={`tool toggle ${autoApprove ? "on" : ""}`}
+                      type="button"
+                      title={`전처리 자동 승인(검토 없이 바로 색인): ${autoApprove ? "켜짐" : "꺼짐"}`}
+                      onClick={() => toggleAutoApprove()}
+                    >
+                      <Sparkles size={16} />
                     </button>
                   </div>
                   <button type="button" onClick={runChat} disabled={busy || !query.trim()} aria-label="전송" className="send-btn">

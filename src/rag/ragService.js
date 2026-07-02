@@ -761,6 +761,9 @@ class RagService {
   async runPreprocessJob(jobId, profileId, input) {
     const onlySourceIds = Array.isArray(input.sourceIds) ? new Set(input.sourceIds) : null;
     const force = Boolean(input.force);
+    // Auto-approve: index each source straight after structuring instead of
+    // stopping at the `review` state (fully automatic mode).
+    const autoIndex = Boolean(input.autoIndex);
     const candidates = all(this.db, "SELECT * FROM sources WHERE profile_id = ? ORDER BY created_at ASC", profileId).filter(
       (source) => !onlySourceIds || onlySourceIds.has(source.id)
     );
@@ -777,7 +780,8 @@ class RagService {
     let failed = 0;
     for (const source of candidates) {
       try {
-        await this.preprocessSource(source, { force });
+        const structured = await this.preprocessSource(source, { force });
+        if (autoIndex && structured) await this.indexSource(structured);
         processed += 1;
       } catch (error) {
         failed += 1;
@@ -790,7 +794,7 @@ class RagService {
       }
       updateJob(this.db, jobId, {
         status: "running",
-        message: `Structured ${processed}/${candidates.length}`,
+        message: `${autoIndex ? "Structured & indexed" : "Structured"} ${processed}/${candidates.length}`,
         processed_sources: processed,
         failed_sources: failed
       });
@@ -813,13 +817,17 @@ class RagService {
 
     run(this.db, "UPDATE sources SET status = ?, error = ?, updated_at = ? WHERE id = ?", "structuring", "", nowIso(), source.id);
 
+    // Hybrid routing by source kind: images go to vision, PDFs go page-by-page
+    // (vision for scanned pages, text for pages with a text layer), and
+    // everything else has its extracted text restructured by the text LLM.
+    const visionLlm = this.settingsStore?.get()?.llm || {};
     let markdown = "";
     if (source.kind === "image") {
-      // Vision-first: reconstruct the screenshot's structure as Markdown.
-      const llm = this.settingsStore?.get()?.llm || {};
       if (!source.file_path) throw new Error("이미지 파일 경로가 없습니다.");
       const dataUrl = await imageToDataUrl(source.file_path);
-      markdown = await structureFromImage(dataUrl, { llm });
+      markdown = await structureFromImage(dataUrl, { llm: visionLlm });
+    } else if (source.kind === "pdf" && source.file_path) {
+      markdown = await this._preprocessPdf(source, visionLlm);
     } else {
       // Text path: extract raw text (pasted or via the worker) then restructure.
       let text = String(source.pasted_text || "");
@@ -839,6 +847,45 @@ class RagService {
       markdown, at, source.content_hash || "", "review", "", at, source.id
     );
     return one(this.db, "SELECT * FROM sources WHERE id = ?", source.id);
+  }
+
+  // Structure a PDF page-by-page: scanned pages are reconstructed from their
+  // rendered image via vision; pages with a text layer are restructured as text.
+  // Each page is prefixed with a heading so section context survives chunking.
+  async _preprocessPdf(source, visionLlm) {
+    const rendered = await this.worker.render(source);
+    if (rendered.status !== "ok") throw new Error(rendered.error || "PDF 렌더링에 실패했습니다.");
+    const parts = [];
+    for (const page of rendered.pages || []) {
+      let md = "";
+      if (page.image) {
+        md = await structureFromImage(page.image, { llm: visionLlm });
+      } else if (String(page.text || "").trim()) {
+        md = await structureFromText(page.text, { llm: this.llm });
+      }
+      if (md.trim()) parts.push(`<!-- page ${page.page} -->\n${md.trim()}`);
+    }
+    return parts.join("\n\n");
+  }
+
+  // Resolve a source to something openable: an on-disk file, an external URL, or
+  // inline pasted text. Used by the "open original" (double-click) action.
+  getSourceFile(profileId, sourceId) {
+    this.ensureProfile(profileId);
+    const source = one(this.db, "SELECT * FROM sources WHERE id = ? AND profile_id = ?", sourceId, profileId);
+    if (!source) throw Object.assign(new Error("Source not found"), { statusCode: 404 });
+    const url = safeJson(source.metadata_json)?.url;
+    if (source.kind === "url" && url) return { kind: "url", url };
+    if (source.file_path && existsSync(source.file_path)) {
+      return {
+        kind: "file",
+        filePath: source.file_path,
+        fileName: source.file_name || basename(source.file_path),
+        mimeType: source.mime_type || mimeFromFileName(source.file_name || source.file_path)
+      };
+    }
+    if (source.pasted_text) return { kind: "text", text: source.pasted_text, fileName: `${source.title || "source"}.txt` };
+    throw Object.assign(new Error("열 수 있는 원본이 없습니다."), { statusCode: 404 });
   }
 
   // Save a human-reviewed edit of a source's structured Markdown. Clearing it
@@ -1434,6 +1481,31 @@ function decodeEntities(text) {
 function isInside(parent, child) {
   const p = parent.endsWith("/") ? parent : `${parent}/`;
   return child === parent || child.startsWith(p);
+}
+
+const MIME_BY_EXT = {
+  ".pdf": "application/pdf",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".bmp": "image/bmp",
+  ".tif": "image/tiff",
+  ".tiff": "image/tiff",
+  ".svg": "image/svg+xml",
+  ".txt": "text/plain",
+  ".md": "text/markdown",
+  ".csv": "text/csv",
+  ".json": "application/json",
+  ".html": "text/html",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+};
+
+function mimeFromFileName(fileName) {
+  return MIME_BY_EXT[extname(String(fileName || "")).toLowerCase()] || "application/octet-stream";
 }
 
 function kindFromFileName(fileName) {
