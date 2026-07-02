@@ -1089,7 +1089,12 @@ function App() {
         }
       ]);
       setActiveCitations(panelCites);
-      setStatus("답변 완료");
+      const t = payload.timings;
+      setStatus(
+        t
+          ? `답변 완료 · 검색 ${t.totalMs}ms${t.reranker && t.reranker !== "none" ? ` (리랭크 ${t.rerankMs}ms/${t.reranker})` : ""} · 생성 ${t.answerMs}ms`
+          : "답변 완료"
+      );
     } catch (err) {
       setMessages((prev) => [
         ...prev,
