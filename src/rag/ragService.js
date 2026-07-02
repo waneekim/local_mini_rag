@@ -766,8 +766,10 @@ class RagService {
         .map((r) => ({ ...pool[r.index], rerankScore: Number(r.score.toFixed(6)), score: Number(r.score.toFixed(6)) }))
         .filter((hit) => min == null || hit.score >= min)
         .sort((a, b) => b.score - a.score);
-      // If the reranker dropped everything (e.g. all below min), keep embeddings.
-      return rescored.length ? rescored : scored;
+      // Keep embeddings if the reranker dropped everything (all below min) or
+      // gave no signal at all (all zero — e.g. LLM returned an empty/garbled score).
+      if (!rescored.length || rescored.every((hit) => hit.score === 0)) return scored;
+      return rescored;
     } catch (error) {
       this.logger?.warn?.(`rerank failed, using embedding order: ${error.message}`);
       return scored;
