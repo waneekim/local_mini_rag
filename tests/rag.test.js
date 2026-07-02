@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { createApp } from "../src/app.js";
 import { EmbeddingService, localNgramEmbedding } from "../src/rag/embedding.js";
+import { LlmProvider, parseJsonObject } from "../src/rag/llmProvider.js";
 import { normalizeUploadedFileName, sanitizeFileName } from "../src/rag/sanitize.js";
 import { cosineSimilarity } from "../src/rag/vectorMath.js";
 
@@ -44,6 +45,41 @@ test("http embedding backend uses OpenAI-compatible embeddings endpoint", async 
   assert.equal(calls[0].url, "http://embedding.local/v1/embeddings");
   assert.equal(calls[0].options.headers.authorization, "Bearer test-key");
   assert.equal(JSON.parse(calls[0].options.body).model, "company-embedding");
+});
+
+test("chat posts to {baseUrl}/chat/completions and merges extra_body at top level", async () => {
+  const calls = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, json: async () => ({ choices: [{ message: { content: "hi" } }] }) };
+  };
+  try {
+    const provider = new LlmProvider({
+      baseUrl: "http://llm.local:9000/v1",
+      model: "llm-large",
+      extraBody: { chat_template_kwargs: { enable_thinking: false } }
+    });
+    const result = await provider.generate({ query: "Hello", envelope: { contextText: "", citations: [] } });
+    assert.equal(result.answer, "hi");
+    assert.equal(calls[0].url, "http://llm.local:9000/v1/chat/completions");
+    const body = JSON.parse(calls[0].options.body);
+    assert.equal(body.model, "llm-large");
+    assert.deepEqual(body.chat_template_kwargs, { enable_thinking: false });
+    assert.equal(body.messages[0].role, "system");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("parseJsonObject accepts objects/JSON and rejects junk", () => {
+  assert.deepEqual(parseJsonObject({ a: 1 }), { a: 1 });
+  assert.deepEqual(parseJsonObject('{"chat_template_kwargs":{"enable_thinking":false}}'), {
+    chat_template_kwargs: { enable_thinking: false }
+  });
+  assert.deepEqual(parseJsonObject(""), {});
+  assert.deepEqual(parseJsonObject("[1,2]"), {});
+  assert.deepEqual(parseJsonObject("not json"), {});
 });
 
 test("uploaded Korean filenames survive multipart mojibake", () => {

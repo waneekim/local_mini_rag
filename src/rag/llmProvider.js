@@ -65,6 +65,9 @@ export class LlmProvider {
     this.provider = options.provider || process.env.LLM_PROVIDER || (this.baseUrl ? "openai-compatible" : "mock");
     // Cap output length to bound worst-case latency. 0 = unlimited.
     this.maxTokens = Number(options.maxTokens ?? process.env.LLM_MAX_TOKENS ?? 1024);
+    // Extra top-level fields merged into the chat request body — mirrors the
+    // OpenAI client's `extra_body`. e.g. vLLM's {"chat_template_kwargs":{"enable_thinking":false}}.
+    this.extraBody = parseJsonObject(options.extraBody ?? process.env.LLM_EXTRA_BODY);
   }
 
   describe() {
@@ -92,6 +95,7 @@ export class LlmProvider {
         model: this.model,
         temperature: 0.2,
         ...(this.maxTokens > 0 ? { max_tokens: this.maxTokens } : {}),
+        ...this.extraBody,
         messages: [
           {
             role: "system",
@@ -148,5 +152,18 @@ function redactUrl(url) {
     return `${parsed.protocol}//${parsed.host}`;
   } catch {
     return "configured";
+  }
+}
+
+// Parse a JSON object from config; ignore anything that isn't a plain object.
+export function parseJsonObject(value) {
+  if (value && typeof value === "object") return value;
+  const text = String(value || "").trim();
+  if (!text) return {};
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
   }
 }
