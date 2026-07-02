@@ -811,7 +811,10 @@ class RagService {
     // Relevance floor: below this combined score a hit is treated as noise and
     // dropped, so the LLM gets "no context" instead of unrelated chunks. 0 = off.
     const minScore = Number(input.minScore ?? process.env.RAG_MIN_SCORE ?? 0);
+    const tEmbed = performance.now();
     const [queryVector] = await this.embeddings.embed([query], { mode: "query" });
+    const embedMs = performance.now() - tEmbed;
+    const tScore = performance.now();
     const chunks = all(
       this.db,
       `SELECT chunks.*, sources.title, sources.file_name, sources.relative_path, sources.kind
@@ -842,24 +845,39 @@ class RagService {
       })
       .filter((hit) => hit.score > 0 && hit.score >= minScore)
       .sort((a, b) => b.score - a.score);
+    const scoreMs = performance.now() - tScore;
 
-    const reranked = await this.maybeRerank(query, scored);
+    const rr = await this.maybeRerank(query, scored);
+    const timings = {
+      embedMs: Math.round(embedMs),
+      scoreMs: Math.round(scoreMs),
+      rerankMs: Math.round(rr.rerankMs),
+      totalMs: Math.round(embedMs + scoreMs + rr.rerankMs),
+      chunkCount: chunks.length,
+      candidates: rr.candidates,
+      reranker: rr.reranked ? this.reranker.backend : "none"
+    };
+    this.logger?.info?.({ msg: "retrieval", query: query.slice(0, 60), ...timings });
 
     return {
       profileId,
       query,
       topK,
-      reranked: reranked !== scored,
-      hits: diversify(reranked, topK)
+      reranked: rr.reranked,
+      timings,
+      hits: diversify(rr.hits, topK)
     };
   }
 
   // Re-score the top embedding candidates with the precision reranker (if
   // configured). Falls back to the embedding order on any error so search
-  // never fails because of the reranker.
+  // never fails because of the reranker. Returns { hits, reranked, rerankMs, candidates }.
   async maybeRerank(query, scored) {
-    if (!this.reranker?.enabled || scored.length < 2) return scored;
+    if (!this.reranker?.enabled || scored.length < 2) {
+      return { hits: scored, reranked: false, rerankMs: 0, candidates: 0 };
+    }
     const pool = scored.slice(0, this.reranker.candidates);
+    const t0 = performance.now();
     try {
       const apiKey = this.settingsStore?.get()?.llm?.apiKey || process.env.LLM_API_KEY || "";
       const results = await this.reranker.rerank(query, pool.map((hit) => hit.text), { llm: this.llm, apiKey });
@@ -869,13 +887,16 @@ class RagService {
         .map((r) => ({ ...pool[r.index], rerankScore: Number(r.score.toFixed(6)), score: Number(r.score.toFixed(6)) }))
         .filter((hit) => min == null || hit.score >= min)
         .sort((a, b) => b.score - a.score);
+      const rerankMs = performance.now() - t0;
       // Keep embeddings if the reranker dropped everything (all below min) or
       // gave no signal at all (all zero — e.g. LLM returned an empty/garbled score).
-      if (!rescored.length || rescored.every((hit) => hit.score === 0)) return scored;
-      return rescored;
+      if (!rescored.length || rescored.every((hit) => hit.score === 0)) {
+        return { hits: scored, reranked: false, rerankMs, candidates: pool.length };
+      }
+      return { hits: rescored, reranked: true, rerankMs, candidates: pool.length };
     } catch (error) {
       this.logger?.warn?.(`rerank failed, using embedding order: ${error.message}`);
-      return scored;
+      return { hits: scored, reranked: false, rerankMs: performance.now() - t0, candidates: pool.length };
     }
   }
 
@@ -905,6 +926,7 @@ class RagService {
       contextText,
       hits: search.hits,
       citations,
+      timings: search.timings,
       sourceVersion: sourceVersion(this.db, profileId)
     };
   }
@@ -931,12 +953,15 @@ class RagService {
       }
     }
 
+    const tGen = performance.now();
     const result = await this.llm.generate({
       query,
       messages: input.messages || [],
       envelope,
       system: mode?.system
     });
+    const answerMs = Math.round(performance.now() - tGen);
+    const timings = { ...(envelope.timings || {}), answerMs };
     const at = nowIso();
     const runId = id("chat");
     run(
@@ -958,6 +983,7 @@ class RagService {
       answer: result.answer,
       citations: envelope.citations,
       violations,
+      timings,
       provider: result.provider,
       sourceVersion: envelope.sourceVersion,
       created_at: at
