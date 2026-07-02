@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createApp } from "../src/app.js";
+import { chunkDocuments } from "../src/rag/chunking.js";
 import { EmbeddingService, localNgramEmbedding } from "../src/rag/embedding.js";
 import { LlmProvider, parseJsonObject } from "../src/rag/llmProvider.js";
 import { RerankService } from "../src/rag/rerank.js";
@@ -271,6 +272,94 @@ test("profile text sources can be indexed, searched, and isolated", async () => 
     const chat = await post(app, `/api/profiles/${profileA.id}/chat`, { query: "환불은 언제 되나요?" });
     assert.equal(chat.answer, "answer with 1 citations");
     assert.equal(chat.citations.length, 1);
+  } finally {
+    await app.close();
+  }
+});
+
+test("markdown chunking splits on headings and keeps tables whole", () => {
+  const md = [
+    "# 보이스앤톤",
+    "",
+    "사용자는 '나'로 지칭한다.",
+    "",
+    "## 표현 대조표",
+    "",
+    "| 추천 | 피해야 할 말 |",
+    "| --- | --- |",
+    "| 내 폰 찾기 | 사용자 폰 찾기 |",
+    "| 내 모습 등록 | 사용자 모습 등록 |"
+  ].join("\n");
+
+  const chunks = chunkDocuments([{ text: md, metadata: { format: "markdown" }, locator: {} }]);
+  assert.equal(chunks.length >= 2, true);
+
+  // The intro sits under the top heading.
+  const intro = chunks.find((c) => c.text.includes("사용자는 '나'로 지칭한다."));
+  assert.equal(intro.locator.heading, "보이스앤톤");
+
+  // The table is never split mid-row: both data rows land in one chunk, tagged
+  // with the full heading path.
+  const table = chunks.find((c) => c.text.includes("| 추천"));
+  assert.match(table.text, /내 폰 찾기/);
+  assert.match(table.text, /내 모습 등록/);
+  assert.equal(table.locator.heading, "보이스앤톤 > 표현 대조표");
+});
+
+test("preprocess agent: structure a source, review-edit it, then index the Markdown", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-pre-"));
+  const generated =
+    "# 보이스앤톤\n\n사용자는 '나'로 지칭한다.\n\n| 추천 | 피해야 할 말 |\n| --- | --- |\n| 내 폰 찾기 | 사용자 폰 찾기 |";
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      complete: async () => generated, // structuring agent returns clean Markdown
+      generate: async ({ envelope }) => ({ answer: `ok ${envelope.citations.length}`, provider: {}, raw: {} })
+    }
+  });
+
+  try {
+    const p = await post(app, "/api/profiles", { name: "가이드" });
+    await post(app, `/api/profiles/${p.id}/sources/text`, {
+      title: "보이스앤톤",
+      text: "사용자는 나로 지칭. 추천 내 폰 찾기 / 피해야 할 말 사용자 폰 찾기"
+    });
+
+    // Preprocess (not indexed yet): the reviewed Markdown lands on the source.
+    const pjob = await post(app, `/api/profiles/${p.id}/preprocess`, {});
+    await waitForJob(app, pjob.id);
+    let sources = await get(app, `/api/profiles/${p.id}/sources`);
+    assert.equal(sources[0].normalized_md, generated);
+    assert.equal(sources[0].status, "review");
+    assert.equal(sources[0].preprocessed_at.length > 0, true);
+
+    // Human edit adds a row; the edit is what gets indexed.
+    const edited = `${generated}\n| 내 모습 등록 | 사용자 모습 등록 |`;
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/api/profiles/${p.id}/sources/${sources[0].id}/normalized`,
+      payload: { markdown: edited },
+      headers: { "content-type": "application/json" }
+    });
+    assert.equal(patched.statusCode, 200, patched.body);
+    assert.equal(patched.json().normalized_md, edited);
+
+    // Index uses the Markdown (not the raw pasted text) and chunks it structurally.
+    const ijob = await post(app, `/api/profiles/${p.id}/index`, {});
+    await waitForJob(app, ijob.id);
+    sources = await get(app, `/api/profiles/${p.id}/sources`);
+    assert.equal(sources[0].status, "indexed");
+    assert.equal(sources[0].chunkCount > 0, true);
+
+    const search = await post(app, `/api/profiles/${p.id}/search`, { query: "내 폰 찾기" });
+    assert.equal(search.hits.length > 0, true);
+    // The retrieved chunk carries its section heading from the Markdown structure.
+    assert.equal(search.hits.some((h) => (h.locator?.heading || "").includes("보이스앤톤")), true);
+    // The edited row survived into the indexed table chunk.
+    assert.equal(search.hits.some((h) => h.text.includes("내 모습 등록")), true);
   } finally {
     await app.close();
   }

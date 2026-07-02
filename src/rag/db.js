@@ -115,6 +115,23 @@ function migrate(db) {
   if (!columns.includes("published")) {
     db.exec("ALTER TABLE profiles ADD COLUMN published INTEGER NOT NULL DEFAULT 0");
   }
+
+  // Preprocessing agent: a structuring pass turns a messy/OCR'd source (or a
+  // document screenshot) into clean Markdown BEFORE chunking. The result is
+  // held here for human review; indexing prefers it over the raw extraction.
+  const sourceColumns = db.prepare("PRAGMA table_info(sources)").all().map((c) => c.name);
+  // Restructured Markdown (empty = not preprocessed; index uses raw extraction).
+  if (!sourceColumns.includes("normalized_md")) {
+    db.exec("ALTER TABLE sources ADD COLUMN normalized_md TEXT NOT NULL DEFAULT ''");
+  }
+  if (!sourceColumns.includes("preprocessed_at")) {
+    db.exec("ALTER TABLE sources ADD COLUMN preprocessed_at TEXT NOT NULL DEFAULT ''");
+  }
+  // content_hash captured when normalized_md was produced, so a re-run can skip
+  // sources whose content has not changed since the last structuring pass.
+  if (!sourceColumns.includes("preprocess_hash")) {
+    db.exec("ALTER TABLE sources ADD COLUMN preprocess_hash TEXT NOT NULL DEFAULT ''");
+  }
 }
 
 export function one(db, sql, ...params) {

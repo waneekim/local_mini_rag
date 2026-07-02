@@ -8,6 +8,7 @@ import { hashFile, hashText } from "./hash.js";
 import { id, nowIso } from "./ids.js";
 import { CHAT_MODES, LlmProvider } from "./llmProvider.js";
 import { extractTextFromImage } from "./vision.js";
+import { imageToDataUrl, structureFromImage, structureFromText } from "./preprocess.js";
 import { basenameFromRelative, normalizeUploadedFileName, sanitizeFileName } from "./sanitize.js";
 import { chunkDocuments } from "./chunking.js";
 import { cosineSimilarity, lexicalScore } from "./vectorMath.js";
@@ -719,6 +720,143 @@ class RagService {
     return { ok: true };
   }
 
+  // --- Preprocessing agent (structure a source into reviewable Markdown) ----
+  // Turns a messy/OCR'd source or a document screenshot into clean Markdown
+  // BEFORE indexing. Runs as a background job like indexing; the result lands in
+  // `sources.normalized_md` with status `review` for the user to check/edit.
+
+  async startPreprocessJob(profileId, input = {}) {
+    this.ensureProfile(profileId);
+    const at = nowIso();
+    const job = {
+      id: id("job"),
+      profile_id: profileId,
+      type: "preprocess",
+      status: "queued",
+      message: "Queued",
+      total_sources: 0,
+      processed_sources: 0,
+      failed_sources: 0,
+      created_at: at,
+      updated_at: at
+    };
+    run(
+      this.db,
+      `INSERT INTO jobs
+       (id, profile_id, type, status, message, total_sources, processed_sources, failed_sources, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      job.id, job.profile_id, job.type, job.status, job.message,
+      job.total_sources, job.processed_sources, job.failed_sources, job.created_at, job.updated_at
+    );
+
+    queueMicrotask(() => {
+      this.runPreprocessJob(job.id, profileId, input).catch((error) => {
+        this.logger?.error?.(error);
+        updateJob(this.db, job.id, { status: "failed", message: error.message });
+      });
+    });
+    return job;
+  }
+
+  async runPreprocessJob(jobId, profileId, input) {
+    const onlySourceIds = Array.isArray(input.sourceIds) ? new Set(input.sourceIds) : null;
+    const force = Boolean(input.force);
+    const candidates = all(this.db, "SELECT * FROM sources WHERE profile_id = ? ORDER BY created_at ASC", profileId).filter(
+      (source) => !onlySourceIds || onlySourceIds.has(source.id)
+    );
+
+    updateJob(this.db, jobId, {
+      status: "running",
+      message: "Structuring",
+      total_sources: candidates.length,
+      processed_sources: 0,
+      failed_sources: 0
+    });
+
+    let processed = 0;
+    let failed = 0;
+    for (const source of candidates) {
+      try {
+        await this.preprocessSource(source, { force });
+        processed += 1;
+      } catch (error) {
+        failed += 1;
+        processed += 1;
+        run(
+          this.db,
+          "UPDATE sources SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+          "failed_with_action", error.message, nowIso(), source.id
+        );
+      }
+      updateJob(this.db, jobId, {
+        status: "running",
+        message: `Structured ${processed}/${candidates.length}`,
+        processed_sources: processed,
+        failed_sources: failed
+      });
+    }
+
+    updateJob(this.db, jobId, {
+      status: failed ? "completed_with_errors" : "completed",
+      message: failed ? `${failed} source(s) need action` : "Completed",
+      processed_sources: processed,
+      failed_sources: failed
+    });
+    touchProfile(this.db, profileId);
+  }
+
+  async preprocessSource(source, { force = false } = {}) {
+    // Skip untouched sources already structured for their current content.
+    if (!force && String(source.normalized_md || "").trim() && source.preprocess_hash && source.preprocess_hash === source.content_hash) {
+      return one(this.db, "SELECT * FROM sources WHERE id = ?", source.id);
+    }
+
+    run(this.db, "UPDATE sources SET status = ?, error = ?, updated_at = ? WHERE id = ?", "structuring", "", nowIso(), source.id);
+
+    let markdown = "";
+    if (source.kind === "image") {
+      // Vision-first: reconstruct the screenshot's structure as Markdown.
+      const llm = this.settingsStore?.get()?.llm || {};
+      if (!source.file_path) throw new Error("이미지 파일 경로가 없습니다.");
+      const dataUrl = await imageToDataUrl(source.file_path);
+      markdown = await structureFromImage(dataUrl, { llm });
+    } else {
+      // Text path: extract raw text (pasted or via the worker) then restructure.
+      let text = String(source.pasted_text || "");
+      if (!text.trim()) {
+        const extracted = await this.worker.extract(source);
+        if (extracted.status !== "ok") throw new Error(extracted.error || "Document extraction failed");
+        text = (extracted.documents || []).map((doc) => doc.text).join("\n\n");
+      }
+      markdown = await structureFromText(text, { llm: this.llm });
+    }
+
+    if (!markdown.trim()) throw new Error("전처리 결과가 비어 있습니다.");
+    const at = nowIso();
+    run(
+      this.db,
+      "UPDATE sources SET normalized_md = ?, preprocessed_at = ?, preprocess_hash = ?, status = ?, error = ?, updated_at = ? WHERE id = ?",
+      markdown, at, source.content_hash || "", "review", "", at, source.id
+    );
+    return one(this.db, "SELECT * FROM sources WHERE id = ?", source.id);
+  }
+
+  // Save a human-reviewed edit of a source's structured Markdown. Clearing it
+  // (empty string) reverts the source to raw-extraction indexing.
+  updateNormalized(profileId, sourceId, markdown) {
+    this.ensureProfile(profileId);
+    const source = one(this.db, "SELECT * FROM sources WHERE id = ? AND profile_id = ?", sourceId, profileId);
+    if (!source) throw Object.assign(new Error("Source not found"), { statusCode: 404 });
+    const md = String(markdown ?? "");
+    const at = nowIso();
+    run(
+      this.db,
+      "UPDATE sources SET normalized_md = ?, preprocessed_at = ?, preprocess_hash = ?, status = ?, updated_at = ? WHERE id = ?",
+      md, md.trim() ? at : "", md.trim() ? source.content_hash || "" : "", md.trim() ? "review" : "pending", at, sourceId
+    );
+    return one(this.db, "SELECT * FROM sources WHERE id = ?", sourceId);
+  }
+
   async startIndexJob(profileId, input = {}) {
     this.ensureProfile(profileId);
     const at = nowIso();
@@ -825,12 +963,29 @@ class RagService {
     run(this.db, "DELETE FROM chunks WHERE source_id = ?", source.id);
     run(this.db, "UPDATE sources SET status = ?, error = ?, updated_at = ? WHERE id = ?", "extracting", "", nowIso(), source.id);
 
-    const extracted = await this.worker.extract(source);
-    if (extracted.status !== "ok") {
-      throw new Error(extracted.error || "Document extraction failed");
+    // Prefer the preprocessing agent's reviewed Markdown when present: skip the
+    // raw extractor and chunk the clean, structure-preserving text instead.
+    const normalized = String(source.normalized_md || "").trim();
+    let documents;
+    let warnings = [];
+    if (normalized) {
+      documents = [
+        {
+          text: normalized,
+          locator: { relativePath: source.relative_path || "", format: "markdown" },
+          metadata: { title: source.title || source.file_name || "source", sourceId: source.id, format: "markdown" }
+        }
+      ];
+    } else {
+      const extracted = await this.worker.extract(source);
+      if (extracted.status !== "ok") {
+        throw new Error(extracted.error || "Document extraction failed");
+      }
+      documents = extracted.documents || [];
+      warnings = extracted.warnings || [];
     }
 
-    const chunks = chunkDocuments(extracted.documents || []);
+    const chunks = chunkDocuments(documents);
     if (!chunks.length) throw new Error("No indexable text extracted");
 
     run(this.db, "UPDATE sources SET status = ?, updated_at = ? WHERE id = ?", "embedding", nowIso(), source.id);
@@ -871,8 +1026,9 @@ class RagService {
       at,
       JSON.stringify({
         ...safeJson(source.metadata_json),
-        warnings: extracted.warnings || [],
-        extractedUnits: extracted.documents?.length || 0,
+        warnings,
+        preprocessed: Boolean(normalized),
+        extractedUnits: documents.length,
         chunks: chunks.length
       }),
       source.id

@@ -1108,6 +1108,7 @@ input:focus, select:focus, textarea:focus {
 .rule-badge { font-size: 0.7rem; padding: 1px 7px; border-radius: 999px; background: rgba(255,255,255,0.1); }
 .rule-badge.approved { background: rgba(46, 160, 67, 0.22); }
 .rule-principle { font-weight: 600; }
+.structure-editor { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; line-height: 1.5; white-space: pre; }
 .rule-field { display: flex; flex-direction: column; gap: 2px; font-size: 0.74rem; opacity: 0.85; }
 .rule-pairs { display: flex; flex-direction: column; gap: 3px; font-size: 0.8rem; }
 .rule-pair .bad { color: #e5726f; text-decoration: line-through; }

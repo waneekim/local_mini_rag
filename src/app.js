@@ -189,6 +189,16 @@ export async function createApp(options = {}) {
     return rag.deleteSource(request.params.profileId, request.params.sourceId);
   });
 
+  // Preprocessing agent: structure sources into reviewable Markdown before indexing.
+  app.post("/api/profiles/:profileId/preprocess", async (request, reply) => {
+    const job = await rag.startPreprocessJob(request.params.profileId, request.body || {});
+    return reply.code(202).send(job);
+  });
+
+  app.patch("/api/profiles/:profileId/sources/:sourceId/normalized", async (request) => {
+    return rag.updateNormalized(request.params.profileId, request.params.sourceId, request.body?.markdown ?? "");
+  });
+
   app.post("/api/profiles/:profileId/index", async (request, reply) => {
     const job = await rag.startIndexJob(request.params.profileId, request.body || {});
     return reply.code(202).send(job);

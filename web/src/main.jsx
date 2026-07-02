@@ -123,6 +123,8 @@ function App() {
   // Guideline rules (structured compliance) per agent.
   const [rulesModal, setRulesModal] = useState(null); // { profileId }
   const [rules, setRules] = useState([]);
+  // Preprocessing agent: review/edit a source's structured Markdown before indexing.
+  const [structureModal, setStructureModal] = useState(null); // { pid, source, md, busy }
   const [ruleBusy, setRuleBusy] = useState(false);
   const [lintInput, setLintInput] = useState("");
   const [lintResult, setLintResult] = useState(null);
@@ -741,6 +743,46 @@ function App() {
     });
     setJob(payload);
     setStatus(`임베딩 중 (${sourceIds.length}개)`);
+  }
+
+  // Run the structuring (preprocessing) agent over sources: extract meaning and
+  // rebuild them as clean Markdown for review before indexing. Reuses the shared
+  // job poller, which reloads sources when the job finishes.
+  async function structureSources(sourceIds, pid) {
+    if (!sourceIds.length) return;
+    const payload = await fetchJson(`/api/profiles/${pid}/preprocess`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sourceIds })
+    });
+    setJob(payload);
+    setStatus(`구조화(전처리) 중 (${sourceIds.length}개)`);
+  }
+
+  // Open the review editor with the source's current structured Markdown.
+  async function openStructure(pid, sourceId) {
+    const list = sourcesByProfile[pid] || (await loadSources(pid));
+    const source = list.find((s) => s.id === sourceId);
+    if (!source) return;
+    setStructureModal({ pid, source, md: source.normalized_md || "", busy: false });
+  }
+
+  async function saveStructure() {
+    if (!structureModal) return;
+    setStructureModal((m) => ({ ...m, busy: true }));
+    try {
+      await fetchJson(`/api/profiles/${structureModal.pid}/sources/${structureModal.source.id}/normalized`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ markdown: structureModal.md })
+      });
+      await loadSources(structureModal.pid);
+      setStatus("구조화 저장됨 — 이제 임베딩하면 이 마크다운으로 색인됩니다");
+      setStructureModal(null);
+    } catch (e) {
+      setStatus(`구조화 저장 오류: ${e.message}`);
+      setStructureModal((m) => ({ ...m, busy: false }));
+    }
   }
 
   async function embedAll(pid, onlyPending = false) {
@@ -1512,10 +1554,45 @@ function App() {
             </>
           ) : (
             <>
+              <button onClick={() => { structureSources([menu.source.id], menu.pid); setMenu(null); }}><Sparkles size={14} />구조화(전처리)</button>
+              <button onClick={() => { openStructure(menu.pid, menu.source.id); setMenu(null); }}><FileText size={14} />구조화 검토·편집</button>
               <button onClick={() => { embedSources([menu.source.id], menu.pid); setMenu(null); }}><Zap size={14} />임베딩</button>
               <button className="danger" onClick={() => { removeSource(menu.source); setMenu(null); }}><Trash2 size={14} />삭제</button>
             </>
           )}
+        </div>
+      )}
+
+      {/* Preprocessing review: edit the structured Markdown before indexing */}
+      {structureModal && (
+        <div className="modal-overlay" onClick={() => setStructureModal(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>구조화 검토 — {structureModal.source.title}</h2>
+              <button className="icon-button" type="button" onClick={() => setStructureModal(null)}><X size={18} /></button>
+            </div>
+            <div className="settings-section">
+              <p className="skill-group-label">
+                전처리 에이전트가 만든 <strong>마크다운</strong>을 검토·수정하세요. 저장 후 임베딩하면 원문 대신 이 마크다운이
+                구조(제목·표) 기준으로 청킹·색인됩니다. 비우면 원문 추출 방식으로 되돌아갑니다.
+              </p>
+              <textarea
+                className="structure-editor"
+                rows={18}
+                value={structureModal.md}
+                onChange={(e) => setStructureModal((m) => ({ ...m, md: e.target.value }))}
+                placeholder={"# 대제목\n\n## 소제목\n\n| 추천 | 피해야 할 말 |\n| --- | --- |\n| … | … |"}
+              />
+              <div className="skill-repo-row">
+                <button type="button" className="secondary" onClick={() => structureSources([structureModal.source.id], structureModal.pid)}>
+                  <Sparkles size={15} />전처리 다시 실행
+                </button>
+                <button type="button" onClick={saveStructure} disabled={structureModal.busy}>
+                  {structureModal.busy ? "저장 중…" : "저장"}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
