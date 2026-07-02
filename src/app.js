@@ -212,6 +212,33 @@ export async function createApp(options = {}) {
     return rag.chat(request.params.profileId, request.body || {});
   });
 
+  // Structured writing rules (guideline compliance).
+  app.get("/api/profiles/:profileId/rules", async (request) => {
+    return rag.listRules(request.params.profileId, { status: request.query?.status });
+  });
+
+  app.post("/api/profiles/:profileId/rules", async (request, reply) => {
+    const rule = rag.upsertRule(request.params.profileId, request.body || {});
+    return reply.code(201).send(rule);
+  });
+
+  app.patch("/api/profiles/:profileId/rules/:ruleId", async (request) => {
+    return rag.upsertRule(request.params.profileId, { ...(request.body || {}), id: request.params.ruleId });
+  });
+
+  app.delete("/api/profiles/:profileId/rules/:ruleId", async (request) => {
+    return rag.deleteRule(request.params.profileId, request.params.ruleId);
+  });
+
+  app.post("/api/profiles/:profileId/rules/extract", async (request, reply) => {
+    const result = await rag.extractRules(request.params.profileId, request.body || {});
+    return reply.code(201).send(result);
+  });
+
+  app.post("/api/profiles/:profileId/lint", async (request) => {
+    return rag.lint(request.params.profileId, request.body?.text || "");
+  });
+
   // Stable surface for external tools (Figma plugin): validate text against a
   // profile's guidelines. Defaults to compliance (규율) mode.
   app.post("/api/validate", async (request, reply) => {
@@ -279,7 +306,7 @@ function isPublicRequest(request) {
   if (path === "/api/auth/verify") return true;
   if (path === "/api/validate" || path === "/api/vision/extract") return true;
   if (path === "/api/central/browse") return true;
-  return path.endsWith("/search") || path.endsWith("/context") || path.endsWith("/chat");
+  return path.endsWith("/search") || path.endsWith("/context") || path.endsWith("/chat") || path.endsWith("/lint");
 }
 
 function extractAdminToken(request) {

@@ -1097,6 +1097,26 @@ input:focus, select:focus, textarea:focus {
 }
 .central-admin-on span { display: inline-flex; align-items: center; gap: 6px; }
 
+/* Guideline rules */
+.lint-hits { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.lint-hit { padding: 8px 10px; border-radius: 8px; background: rgba(210, 153, 34, 0.14); font-size: 0.84rem; }
+.lint-rule { margin-top: 3px; opacity: 0.75; font-size: 0.78rem; }
+.rule-row { display: flex; gap: 10px; padding: 10px 0; border-top: 1px solid var(--border, #2a2a2a); }
+.rule-row:first-of-type { border-top: 0; }
+.rule-main { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.rule-head { display: flex; align-items: center; gap: 8px; }
+.rule-badge { font-size: 0.7rem; padding: 1px 7px; border-radius: 999px; background: rgba(255,255,255,0.1); }
+.rule-badge.approved { background: rgba(46, 160, 67, 0.22); }
+.rule-principle { font-weight: 600; }
+.rule-field { display: flex; flex-direction: column; gap: 2px; font-size: 0.74rem; opacity: 0.85; }
+.rule-pairs { display: flex; flex-direction: column; gap: 3px; font-size: 0.8rem; }
+.rule-pair .bad { color: #e5726f; text-decoration: line-through; }
+.rule-pair .good { color: #57b26b; }
+.rule-actions { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+.mini.primary { background: rgba(46, 160, 67, 0.25); }
+.msg-violations { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.msg-violations .lint-hit { font-size: 0.8rem; }
+
 /* Skills manager */
 .skill-repo-row { display: flex; gap: 8px; }
 .skill-repo-row input { flex: 1; }
