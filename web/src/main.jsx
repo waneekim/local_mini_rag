@@ -25,6 +25,8 @@ import {
   Send,
   Settings,
   Sparkles,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   Unlock,
   Upload,
@@ -124,6 +126,11 @@ function App() {
   const [ruleBusy, setRuleBusy] = useState(false);
   const [lintInput, setLintInput] = useState("");
   const [lintResult, setLintResult] = useState(null);
+
+  // Answer feedback (self-improving memory).
+  const [fbForm, setFbForm] = useState(null); // { msgId, note, correction } while giving 👎
+  const [fbModal, setFbModal] = useState(null); // { profileId } review list
+  const [feedbackList, setFeedbackList] = useState([]);
 
   const [sidebarWidth, setSidebarWidth] = useState(() => Math.max(288, Number(localStorage.getItem("rag.sidebarWidth")) || 320));
   const [citationsWidth, setCitationsWidth] = useState(() => Number(localStorage.getItem("rag.citationsWidth")) || 220);
@@ -467,6 +474,47 @@ function App() {
     } catch (error) {
       setStatus(`검사 실패: ${error.message}`);
     }
+  }
+
+  async function rateMessage(msg, rating) {
+    if (rating < 0) {
+      setFbForm({ msgId: msg.id, note: "", correction: "" });
+      return;
+    }
+    await submitFeedback(msg, 1, "", "");
+  }
+
+  async function submitFeedback(msg, rating, note, correction) {
+    const pid = msg.profileId || activeProfileId;
+    if (!pid) return;
+    try {
+      await fetchJson(`/api/profiles/${pid}/feedback`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chatId: msg.id, rating, query: msg.query || "", answer: msg.content, mode: msg.mode, note, correction })
+      });
+      setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, feedback: rating } : m)));
+      setFbForm(null);
+      setStatus(rating > 0 ? "좋은 답변으로 기록됨 · 학습 메모리에 반영" : "개선점으로 기록됨 · 다음 비슷한 질문에 반영");
+    } catch (error) {
+      setStatus(`피드백 저장 실패: ${error.message}`);
+    }
+  }
+
+  async function openFeedback(pid) {
+    setFbModal({ profileId: pid });
+    setFeedbackList([]);
+    try {
+      setFeedbackList(await fetchJson(`/api/profiles/${pid}/feedback`));
+    } catch (error) {
+      setStatus(`피드백 로드 실패: ${error.message}`);
+    }
+  }
+
+  async function removeFeedback(fbId) {
+    const pid = fbModal?.profileId;
+    await fetchJson(`/api/profiles/${pid}/feedback/${fbId}`, { method: "DELETE" });
+    setFeedbackList((prev) => prev.filter((f) => f.id !== fbId));
   }
 
   async function loadSources(pid) {
@@ -1085,7 +1133,10 @@ function App() {
           content: payload.answer,
           citations: cites,
           panelCitations: panelCites,
-          violations: payload.violations || []
+          violations: payload.violations || [],
+          profileId: targetId,
+          query: text,
+          mode
         }
       ]);
       setActiveCitations(panelCites);
@@ -1457,6 +1508,7 @@ function App() {
               <button onClick={() => { openTextDialog(menu.pid); setMenu(null); }}><FileText size={14} />텍스트 추가</button>
               <button onClick={() => { openUrlDialog(menu.pid); setMenu(null); }}><Link size={14} />URL 추가</button>
               <button onClick={() => { openRules(menu.pid); setMenu(null); }}><ClipboardCheck size={14} />규칙(가이드)</button>
+              <button onClick={() => { openFeedback(menu.pid); setMenu(null); }}><ThumbsUp size={14} />피드백 학습</button>
             </>
           ) : (
             <>
@@ -1535,6 +1587,41 @@ function App() {
 
             <div className="modal-footer">
               <button type="button" onClick={() => setRulesModal(null)}>닫기</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Feedback review modal */}
+      {fbModal && (
+        <div className="modal-overlay" onClick={() => setFbModal(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>피드백 학습 — {profiles.find((p) => p.id === fbModal.profileId)?.name || "Agent"}</h2>
+              <button className="icon-button" type="button" onClick={() => setFbModal(null)}><X size={18} /></button>
+            </div>
+            <div className="settings-section">
+              <p className="skill-group-label">
+                👍/👎 {feedbackList.length}건 <span className="optional">(비슷한 질문이 오면 자동으로 프롬프트에 반영됩니다)</span>
+              </p>
+              {feedbackList.length ? feedbackList.map((f) => (
+                <div key={f.id} className={`rule-row ${f.rating > 0 ? "approved" : ""}`}>
+                  <div className="rule-main">
+                    <div className="rule-head">
+                      <span className="rule-badge">{f.rating > 0 ? "👍 좋음" : "👎 개선"}</span>
+                      <strong>{f.query}</strong>
+                    </div>
+                    {f.note ? <div className="optional">문제/이유: {f.note}</div> : null}
+                    {f.correction ? <div className="rule-pair"><span className="good">올바른 답: {f.correction}</span></div> : null}
+                  </div>
+                  <div className="rule-actions">
+                    <button type="button" className="mini danger" title="삭제" onClick={() => removeFeedback(f.id)}><Trash2 size={13} /></button>
+                  </div>
+                </div>
+              )) : <p className="empty tiny">아직 피드백이 없습니다. 답변 아래 👍/👎로 남기면 여기에 쌓입니다.</p>}
+            </div>
+            <div className="modal-footer">
+              <button type="button" onClick={() => setFbModal(null)}>닫기</button>
             </div>
           </div>
         </div>
@@ -2016,6 +2103,29 @@ function App() {
                             </div>
                           ))}
                         </div>
+                      ) : null}
+                      {msg.role === "assistant" && msg.query ? (
+                        fbForm?.msgId === msg.id ? (
+                          <div className="fb-form">
+                            <input value={fbForm.note} onChange={(e) => setFbForm((f) => ({ ...f, note: e.target.value }))} placeholder="무엇이 문제였나요? (선택)" />
+                            <input value={fbForm.correction} onChange={(e) => setFbForm((f) => ({ ...f, correction: e.target.value }))} placeholder="올바른 답/방향 (선택)" />
+                            <div className="fb-form-actions">
+                              <button type="button" className="secondary mini-btn" onClick={() => setFbForm(null)}>취소</button>
+                              <button type="button" className="mini-btn" onClick={() => submitFeedback(msg, -1, fbForm.note, fbForm.correction)}>저장</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="msg-feedback">
+                            {msg.feedback ? (
+                              <span className="fb-done">{msg.feedback > 0 ? "👍 좋은 답변으로 기록됨" : "👎 개선점으로 기록됨"}</span>
+                            ) : (
+                              <>
+                                <button type="button" title="좋은 답변" onClick={() => rateMessage(msg, 1)}><ThumbsUp size={14} /></button>
+                                <button type="button" title="개선 필요" onClick={() => rateMessage(msg, -1)}><ThumbsDown size={14} /></button>
+                              </>
+                            )}
+                          </div>
+                        )
                       ) : null}
                     </div>
                   </div>

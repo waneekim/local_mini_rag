@@ -1116,6 +1116,13 @@ input:focus, select:focus, textarea:focus {
 .mini.primary { background: rgba(46, 160, 67, 0.25); }
 .msg-violations { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
 .msg-violations .lint-hit { font-size: 0.8rem; }
+.msg-feedback { margin-top: 6px; display: flex; gap: 6px; }
+.msg-feedback button { background: transparent; border: 1px solid var(--border, #2a2a2a); border-radius: 6px; padding: 3px 8px; cursor: pointer; color: inherit; opacity: 0.6; }
+.msg-feedback button:hover { opacity: 1; }
+.fb-done { font-size: 0.78rem; opacity: 0.7; }
+.fb-form { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.fb-form input { width: 100%; }
+.fb-form-actions { display: flex; gap: 6px; justify-content: flex-end; }
 
 /* Skills manager */
 .skill-repo-row { display: flex; gap: 8px; }

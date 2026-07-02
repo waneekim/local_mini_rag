@@ -427,6 +427,50 @@ test("rules: extract drafts, approve, lint, and inject violations into complianc
   }
 });
 
+test("feedback memory: a 👎 correction is recalled into a later similar chat", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-fb-"));
+  process.env.RAG_FEEDBACK_MIN_SCORE = "0"; // recall regardless of n-gram similarity
+  let capturedContext = "";
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      generate: async ({ envelope }) => {
+        capturedContext = envelope.contextText;
+        return { answer: "ok", provider: {}, raw: {} };
+      }
+    }
+  });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    await post(app, `/api/profiles/${p.id}/sources/text`, { title: "환불", text: "환불은 구매 후 7일 이내에 처리됩니다." });
+    const job = await post(app, `/api/profiles/${p.id}/index`, {});
+    await waitForJob(app, job.id);
+
+    // Leave negative feedback with a correction.
+    const fb = await post(app, `/api/profiles/${p.id}/feedback`, {
+      rating: -1,
+      query: "환불 며칠 이내에 되나요?",
+      answer: "잘 모르겠습니다.",
+      note: "정확한 기간을 답하지 않음",
+      correction: "환불은 7일 이내입니다."
+    });
+    assert.equal(fb.rating, -1);
+    assert.equal((await get(app, `/api/profiles/${p.id}/feedback`)).length, 1);
+
+    // A later chat recalls it and injects the guidance into the LLM context.
+    const chat = await post(app, `/api/profiles/${p.id}/chat`, { query: "환불 기간이 어떻게 되나요?" });
+    assert.equal(chat.usedFeedback >= 1, true);
+    assert.match(capturedContext, /피드백 학습 메모리/);
+    assert.match(capturedContext, /환불은 7일 이내입니다/);
+  } finally {
+    delete process.env.RAG_FEEDBACK_MIN_SCORE;
+    await app.close();
+  }
+});
+
 async function get(app, url) {
   const response = await app.inject({ method: "GET", url });
   assert.equal(response.statusCode < 300, true, response.body);

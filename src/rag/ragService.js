@@ -416,6 +416,82 @@ class RagService {
     return { violations: lintText(text, rules), ruleCount: rules.length };
   }
 
+  // --- Feedback (self-improving memory) -------------------------------------
+  // 👍/👎 on answers are stored with the query embedding, then recalled for
+  // similar future questions and injected into the prompt. No model training.
+
+  async addFeedback(profileId, input = {}) {
+    this.ensureProfile(profileId);
+    const query = String(input.query || "").trim();
+    const rating = Number(input.rating) >= 0 ? 1 : -1;
+    if (!query) throw Object.assign(new Error("query is required"), { statusCode: 400 });
+    let embedding = [];
+    try {
+      [embedding] = await this.embeddings.embed([query], { mode: "query" });
+    } catch (error) {
+      this.logger?.warn?.(`feedback embed failed: ${error.message}`);
+    }
+    const at = nowIso();
+    const row = {
+      id: id("fb"),
+      profile_id: profileId,
+      chat_id: String(input.chatId || ""),
+      rating,
+      query,
+      answer: String(input.answer || "").slice(0, 4000),
+      note: String(input.note || "").slice(0, 2000),
+      correction: String(input.correction || "").slice(0, 4000),
+      mode: String(input.mode || ""),
+      query_embedding_json: JSON.stringify(embedding || []),
+      created_at: at
+    };
+    run(
+      this.db,
+      `INSERT INTO feedback (id, profile_id, chat_id, rating, query, answer, note, correction, mode, query_embedding_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      row.id, row.profile_id, row.chat_id, row.rating, row.query, row.answer, row.note, row.correction, row.mode,
+      row.query_embedding_json, row.created_at
+    );
+    return hydrateFeedback(row);
+  }
+
+  listFeedback(profileId) {
+    this.ensureProfile(profileId);
+    return all(this.db, "SELECT * FROM feedback WHERE profile_id = ? ORDER BY created_at DESC", profileId).map(hydrateFeedback);
+  }
+
+  deleteFeedback(profileId, feedbackId) {
+    this.ensureProfile(profileId);
+    run(this.db, "DELETE FROM feedback WHERE id = ? AND profile_id = ?", feedbackId, profileId);
+    return { ok: true };
+  }
+
+  // Find the most similar past feedback and render it as a guidance block.
+  async recallFeedback(profileId, query) {
+    if (process.env.RAG_FEEDBACK_MEMORY === "off") return { block: "", used: 0 };
+    const rows = all(this.db, "SELECT * FROM feedback WHERE profile_id = ?", profileId);
+    if (!rows.length) return { block: "", used: 0 };
+    let queryVector;
+    try {
+      [queryVector] = await this.embeddings.embed([query], { mode: "query" });
+    } catch {
+      return { block: "", used: 0 };
+    }
+    const topK = Number(process.env.RAG_FEEDBACK_TOPK || 3);
+    const minScore = Number(process.env.RAG_FEEDBACK_MIN_SCORE || 0.55);
+    const scored = rows
+      .map((row) => {
+        const vector = safeJson(row.query_embedding_json);
+        const score = Array.isArray(vector) && vector.length ? cosineSimilarity(queryVector, vector) : 0;
+        return { row: hydrateFeedback(row), score };
+      })
+      .filter((item) => item.score >= minScore)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
+    if (!scored.length) return { block: "", used: 0 };
+    return { block: buildFeedbackBlock(scored.map((s) => s.row)), used: scored.length };
+  }
+
   listSources(profileId) {
     this.ensureProfile(profileId);
     return all(this.db, "SELECT * FROM sources WHERE profile_id = ? ORDER BY created_at DESC", profileId).map((source) => ({
@@ -953,6 +1029,10 @@ class RagService {
       }
     }
 
+    // Self-improving memory: prepend guidance recalled from similar past feedback.
+    const memory = await this.recallFeedback(profileId, query);
+    if (memory.block) envelope.contextText = `${memory.block}\n\n${envelope.contextText}`;
+
     const tGen = performance.now();
     const result = await this.llm.generate({
       query,
@@ -983,6 +1063,7 @@ class RagService {
       answer: result.answer,
       citations: envelope.citations,
       violations,
+      usedFeedback: memory.used,
       timings,
       provider: result.provider,
       sourceVersion: envelope.sourceVersion,
@@ -992,6 +1073,48 @@ class RagService {
 }
 
 const RULE_MODES = new Set(["compliance", "recommend"]);
+
+function hydrateFeedback(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    profileId: row.profile_id,
+    chatId: row.chat_id,
+    rating: row.rating,
+    query: row.query,
+    answer: row.answer,
+    note: row.note,
+    correction: row.correction,
+    mode: row.mode,
+    created_at: row.created_at
+  };
+}
+
+// Render recalled feedback as a guidance block prepended to the LLM context.
+function buildFeedbackBlock(items) {
+  const good = items.filter((f) => f.rating > 0);
+  const bad = items.filter((f) => f.rating < 0);
+  const lines = ["[사용자 피드백 학습 메모리 — 아래 교훈을 우선 반영하라]"];
+  if (good.length) {
+    lines.push("좋았던 답변(이 방향을 유지):");
+    for (const f of good) {
+      lines.push(`- 질문: ${clip(f.query, 120)}${f.note ? ` / 좋았던 점: ${clip(f.note, 160)}` : ""}`);
+    }
+  }
+  if (bad.length) {
+    lines.push("피해야 할 실수(반복하지 말 것):");
+    for (const f of bad) {
+      const fix = f.correction ? ` / 올바른 답: ${clip(f.correction, 240)}` : "";
+      lines.push(`- 질문: ${clip(f.query, 120)}${f.note ? ` / 문제: ${clip(f.note, 160)}` : ""}${fix}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function clip(text, max) {
+  const s = String(text || "").replace(/\s+/g, " ").trim();
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
 
 function hydrateRule(row) {
   if (!row) return null;
