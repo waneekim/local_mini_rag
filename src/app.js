@@ -239,6 +239,20 @@ export async function createApp(options = {}) {
     return rag.lint(request.params.profileId, request.body?.text || "");
   });
 
+  // Answer feedback (self-improving memory).
+  app.get("/api/profiles/:profileId/feedback", async (request) => {
+    return rag.listFeedback(request.params.profileId);
+  });
+
+  app.post("/api/profiles/:profileId/feedback", async (request, reply) => {
+    const fb = await rag.addFeedback(request.params.profileId, request.body || {});
+    return reply.code(201).send(fb);
+  });
+
+  app.delete("/api/profiles/:profileId/feedback/:feedbackId", async (request) => {
+    return rag.deleteFeedback(request.params.profileId, request.params.feedbackId);
+  });
+
   // Stable surface for external tools (Figma plugin): validate text against a
   // profile's guidelines. Defaults to compliance (규율) mode.
   app.post("/api/validate", async (request, reply) => {
@@ -306,7 +320,14 @@ function isPublicRequest(request) {
   if (path === "/api/auth/verify") return true;
   if (path === "/api/validate" || path === "/api/vision/extract") return true;
   if (path === "/api/central/browse") return true;
-  return path.endsWith("/search") || path.endsWith("/context") || path.endsWith("/chat") || path.endsWith("/lint");
+  // Viewers on a shared host may search/chat/lint and leave feedback.
+  return (
+    path.endsWith("/search") ||
+    path.endsWith("/context") ||
+    path.endsWith("/chat") ||
+    path.endsWith("/lint") ||
+    path.endsWith("/feedback")
+  );
 }
 
 function extractAdminToken(request) {

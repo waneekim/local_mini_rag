@@ -86,6 +86,21 @@ export function createDatabase(dbPath) {
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_rules_profile ON rules(profile_id);
+
+    CREATE TABLE IF NOT EXISTS feedback (
+      id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+      chat_id TEXT NOT NULL DEFAULT '',
+      rating INTEGER NOT NULL,
+      query TEXT NOT NULL,
+      answer TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL DEFAULT '',
+      correction TEXT NOT NULL DEFAULT '',
+      mode TEXT NOT NULL DEFAULT '',
+      query_embedding_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_feedback_profile ON feedback(profile_id);
   `);
   migrate(db);
   return db;
