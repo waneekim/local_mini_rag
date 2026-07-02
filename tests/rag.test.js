@@ -176,6 +176,34 @@ test("search applies the reranker order over embedding order", async () => {
   }
 });
 
+test("search falls back to embedding order when the reranker gives no signal", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-rr0-"));
+  const reranker = {
+    enabled: true,
+    candidates: 24,
+    minScore: null,
+    rerank: async (query, docs) => docs.map((_, index) => ({ index, score: 0 })) // all zero
+  };
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    reranker,
+    llmProvider: { describe: () => ({ provider: "test", model: "mock" }), generate: async () => ({ answer: "ok", provider: {}, raw: {} }) }
+  });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    await post(app, `/api/profiles/${p.id}/sources/text`, { title: "환불 정책", text: "고객 환불은 구매 후 7일 이내에 처리됩니다." });
+    const job = await post(app, `/api/profiles/${p.id}/index`, {});
+    await waitForJob(app, job.id);
+    const search = await post(app, `/api/profiles/${p.id}/search`, { query: "환불 규정" });
+    assert.equal(search.reranked, false); // no-signal rerank ignored
+    assert.equal(search.hits[0].score > 0, true); // embedding score preserved, not overwritten to 0
+  } finally {
+    await app.close();
+  }
+});
+
 test("uploaded Korean filenames survive multipart mojibake", () => {
   const original = "자료/한글파일 이름.xlsx";
   const mojibake = Buffer.from(original, "utf8").toString("latin1");
