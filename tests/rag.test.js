@@ -362,6 +362,71 @@ test("admin token gates mutations but leaves reads open", async () => {
   }
 });
 
+test("rules: extract drafts, approve, lint, and inject violations into compliance chat", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-rules-"));
+  const ruleJson = JSON.stringify([
+    {
+      section: "보이스앤톤",
+      principle: "사용자는 '나'로 지칭한다.",
+      terms: ["사용자"],
+      prefer: ["나", "내"],
+      pairs: [{ avoid: "사용자 폰 찾기", recommend: "내 폰 찾기" }],
+      note: "사용자 시각에서 작성"
+    }
+  ]);
+  let capturedContext = "";
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      complete: async () => ruleJson, // extraction returns the rule JSON
+      generate: async ({ envelope }) => {
+        capturedContext = envelope.contextText;
+        return { answer: "⚠️ 위반", provider: {}, raw: {} };
+      }
+    }
+  });
+  try {
+    const p = await post(app, "/api/profiles", { name: "가이드" });
+    await post(app, `/api/profiles/${p.id}/sources/text`, { title: "보이스앤톤", text: "사용자는 '나'로 지칭한다. 추천: 내 폰 찾기 · 피해야 할 말: 사용자 폰 찾기" });
+    const job = await post(app, `/api/profiles/${p.id}/index`, {});
+    await waitForJob(app, job.id);
+
+    // Extract → drafts (not yet used by lint).
+    const extracted = await post(app, `/api/profiles/${p.id}/rules/extract`, {});
+    assert.equal(extracted.created >= 1, true);
+    const draft = extracted.rules[0];
+    assert.equal(draft.status, "draft");
+    assert.deepEqual(draft.terms, ["사용자"]);
+
+    // Draft doesn't lint yet.
+    const before = await post(app, `/api/profiles/${p.id}/lint`, { text: "사용자 폰 찾기" });
+    assert.equal(before.violations.length, 0);
+
+    // Approve → lint now flags the forbidden term with a suggestion.
+    await app.inject({
+      method: "PATCH",
+      url: `/api/profiles/${p.id}/rules/${draft.id}`,
+      payload: { status: "approved" },
+      headers: { "content-type": "application/json" }
+    });
+    const after = await post(app, `/api/profiles/${p.id}/lint`, { text: "사용자 폰 찾기" });
+    assert.equal(after.violations.length >= 1, true);
+    assert.equal(after.violations[0].match, "사용자");
+    assert.match(after.violations[0].suggest, /나|내/);
+
+    // Compliance chat injects the deterministic violations into the LLM context.
+    const chat = await post(app, `/api/profiles/${p.id}/chat`, { query: "사용자 폰 찾기", mode: "compliance" });
+    assert.equal(chat.violations.length >= 1, true);
+    assert.match(capturedContext, /규칙 기반 자동 감지/);
+    assert.match(capturedContext, /금지 표현 '사용자'/);
+  } finally {
+    await app.close();
+  }
+});
+
 async function get(app, url) {
   const response = await app.inject({ method: "GET", url });
   assert.equal(response.statusCode < 300, true, response.body);

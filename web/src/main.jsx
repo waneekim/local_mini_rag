@@ -5,6 +5,7 @@ import {
   Camera,
   ChevronDown,
   ChevronRight,
+  ClipboardCheck,
   Database,
   Download,
   File,
@@ -23,6 +24,7 @@ import {
   Search,
   Send,
   Settings,
+  Sparkles,
   Trash2,
   Unlock,
   Upload,
@@ -115,6 +117,13 @@ function App() {
   const [centralUrl, setCentralUrl] = useState(() => localStorage.getItem("ark.centralUrl") || "");
   const [centralList, setCentralList] = useState(null); // null=not browsed, []=browsed empty
   const [centralBusy, setCentralBusy] = useState(false);
+
+  // Guideline rules (structured compliance) per agent.
+  const [rulesModal, setRulesModal] = useState(null); // { profileId }
+  const [rules, setRules] = useState([]);
+  const [ruleBusy, setRuleBusy] = useState(false);
+  const [lintInput, setLintInput] = useState("");
+  const [lintResult, setLintResult] = useState(null);
 
   const [sidebarWidth, setSidebarWidth] = useState(() => Math.max(288, Number(localStorage.getItem("rag.sidebarWidth")) || 320));
   const [citationsWidth, setCitationsWidth] = useState(() => Number(localStorage.getItem("rag.citationsWidth")) || 220);
@@ -403,6 +412,60 @@ function App() {
       setStatus(`복제 실패: ${error.message}`);
     } finally {
       setCentralBusy(false);
+    }
+  }
+
+  async function openRules(pid) {
+    setRulesModal({ profileId: pid });
+    setLintInput("");
+    setLintResult(null);
+    setRules([]);
+    try {
+      setRules(await fetchJson(`/api/profiles/${pid}/rules`));
+    } catch (error) {
+      setStatus(`규칙 로드 실패: ${error.message}`);
+    }
+  }
+
+  async function extractRules() {
+    const pid = rulesModal?.profileId;
+    if (!pid) return;
+    setRuleBusy(true);
+    setStatus("가이드에서 규칙 추출 중… (문서가 길면 걸립니다)");
+    try {
+      const r = await fetchJson(`/api/profiles/${pid}/rules/extract`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      setRules(await fetchJson(`/api/profiles/${pid}/rules`));
+      setStatus(`규칙 ${r.created}개 초안 생성됨 — 검토 후 승인하세요`);
+    } catch (error) {
+      setStatus(`규칙 추출 실패: ${error.message}`);
+    } finally {
+      setRuleBusy(false);
+    }
+  }
+
+  async function patchRule(ruleId, patch) {
+    const pid = rulesModal?.profileId;
+    const updated = await fetchJson(`/api/profiles/${pid}/rules/${ruleId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch)
+    });
+    setRules((prev) => prev.map((r) => (r.id === ruleId ? updated : r)));
+  }
+
+  async function deleteRule(ruleId) {
+    const pid = rulesModal?.profileId;
+    await fetchJson(`/api/profiles/${pid}/rules/${ruleId}`, { method: "DELETE" });
+    setRules((prev) => prev.filter((r) => r.id !== ruleId));
+  }
+
+  async function runLint() {
+    const pid = rulesModal?.profileId;
+    if (!pid || !lintInput.trim()) return;
+    try {
+      setLintResult(await fetchJson(`/api/profiles/${pid}/lint`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: lintInput }) }));
+    } catch (error) {
+      setStatus(`검사 실패: ${error.message}`);
     }
   }
 
@@ -1021,7 +1084,8 @@ function App() {
           role: "assistant",
           content: payload.answer,
           citations: cites,
-          panelCitations: panelCites
+          panelCitations: panelCites,
+          violations: payload.violations || []
         }
       ]);
       setActiveCitations(panelCites);
@@ -1387,6 +1451,7 @@ function App() {
               <button onClick={() => { pickFolder(menu.pid); setMenu(null); }}><FolderUp size={14} />폴더 추가</button>
               <button onClick={() => { openTextDialog(menu.pid); setMenu(null); }}><FileText size={14} />텍스트 추가</button>
               <button onClick={() => { openUrlDialog(menu.pid); setMenu(null); }}><Link size={14} />URL 추가</button>
+              <button onClick={() => { openRules(menu.pid); setMenu(null); }}><ClipboardCheck size={14} />규칙(가이드)</button>
             </>
           ) : (
             <>
@@ -1394,6 +1459,79 @@ function App() {
               <button className="danger" onClick={() => { removeSource(menu.source); setMenu(null); }}><Trash2 size={14} />삭제</button>
             </>
           )}
+        </div>
+      )}
+
+      {/* Rules (guideline compliance) modal */}
+      {rulesModal && (
+        <div className="modal-overlay" onClick={() => setRulesModal(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>규칙 — {profiles.find((p) => p.id === rulesModal.profileId)?.name || "Agent"}</h2>
+              <button className="icon-button" type="button" onClick={() => setRulesModal(null)}><X size={18} /></button>
+            </div>
+
+            <div className="settings-section">
+              <p className="skill-group-label">
+                추천↔피해야 할 말·금지어를 <strong>구조화 규칙</strong>으로 관리합니다. 승인된 규칙만 검사·답변에 사용됩니다.
+              </p>
+              <button type="button" className="secondary" onClick={extractRules} disabled={ruleBusy}>
+                <Sparkles size={15} />{ruleBusy ? "추출 중…" : "가이드에서 규칙 추출 (LLM 초안)"}
+              </button>
+            </div>
+
+            <div className="settings-section">
+              <p className="skill-group-label">문장 검사 <span className="optional">(금지 표현 즉시 감지)</span></p>
+              <div className="skill-repo-row">
+                <input value={lintInput} onChange={(e) => setLintInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") runLint(); }} placeholder="예: 얼굴 인식이 더 잘되도록 사용자의 모습을 추가로 등록하세요" />
+                <button type="button" className="secondary" onClick={runLint} disabled={!lintInput.trim()}>검사</button>
+              </div>
+              {lintResult && (
+                lintResult.violations.length ? (
+                  <div className="lint-hits">
+                    {lintResult.violations.map((v, i) => (
+                      <div key={i} className="lint-hit">
+                        ⚠️ 금지 표현 <b>'{v.match}'</b>{v.suggest ? <> → 권장 <b>{v.suggest}</b></> : null}
+                        {v.section ? <span className="optional"> · {v.section}</span> : null}
+                        {v.principle ? <div className="lint-rule">{v.principle}</div> : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="empty tiny">감지된 금지 표현 없음 {lintResult.ruleCount ? "" : "(승인된 규칙이 아직 없습니다)"}</p>
+                )
+              )}
+            </div>
+
+            <div className="settings-section">
+              <p className="skill-group-label">규칙 {rules.length}개 <span className="optional">(승인 {rules.filter((r) => r.status === "approved").length})</span></p>
+              {rules.length ? rules.map((r) => (
+                <div key={r.id} className={`rule-row ${r.status}`}>
+                  <div className="rule-main">
+                    <div className="rule-head">
+                      <span className={`rule-badge ${r.status}`}>{r.status === "approved" ? "승인" : "초안"}</span>
+                      {r.section ? <strong>{r.section}</strong> : null}
+                    </div>
+                    <input className="rule-principle" value={r.principle} onChange={(e) => setRules((prev) => prev.map((x) => x.id === r.id ? { ...x, principle: e.target.value } : x))} placeholder="원칙(한 문장)" />
+                    <label className="rule-field">금지어<input value={(r.terms || []).join(", ")} onChange={(e) => setRules((prev) => prev.map((x) => x.id === r.id ? { ...x, terms: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) } : x))} placeholder="사용자, 사용자의" /></label>
+                    <label className="rule-field">권장어<input value={(r.prefer || []).join(", ")} onChange={(e) => setRules((prev) => prev.map((x) => x.id === r.id ? { ...x, prefer: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) } : x))} placeholder="나, 내" /></label>
+                    {(r.pairs || []).length ? (
+                      <div className="rule-pairs">{r.pairs.map((p, i) => <div key={i} className="rule-pair"><span className="bad">{p.avoid}</span> → <span className="good">{p.recommend}</span></div>)}</div>
+                    ) : null}
+                  </div>
+                  <div className="rule-actions">
+                    <button type="button" className="mini" title="저장" onClick={() => patchRule(r.id, { principle: r.principle, terms: r.terms, prefer: r.prefer })}>저장</button>
+                    <button type="button" className={r.status === "approved" ? "mini" : "mini primary"} onClick={() => patchRule(r.id, { status: r.status === "approved" ? "draft" : "approved" })}>{r.status === "approved" ? "초안으로" : "승인"}</button>
+                    <button type="button" className="mini danger" title="삭제" onClick={() => deleteRule(r.id)}><Trash2 size={13} /></button>
+                  </div>
+                </div>
+              )) : <p className="empty tiny">규칙이 없습니다. 위 <b>규칙 추출</b>로 가이드에서 초안을 만들어 검토하세요.</p>}
+            </div>
+
+            <div className="modal-footer">
+              <button type="button" onClick={() => setRulesModal(null)}>닫기</button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1864,6 +2002,16 @@ function App() {
                       <p className="bubble-text">
                         {msg.role === "assistant" ? renderAnswerText(msg.content, msg.citations, openCitationPopup) : msg.content}
                       </p>
+                      {msg.role === "assistant" && msg.violations?.length ? (
+                        <div className="msg-violations">
+                          {msg.violations.map((v, i) => (
+                            <div key={i} className="lint-hit">
+                              ⚠️ 금지 표현 <b>'{v.match}'</b>{v.suggest ? <> → 권장 <b>{v.suggest}</b></> : null}
+                              {v.section ? <span className="optional"> · {v.section}</span> : null}
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 )

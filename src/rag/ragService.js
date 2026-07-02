@@ -13,6 +13,7 @@ import { chunkDocuments } from "./chunking.js";
 import { cosineSimilarity, lexicalScore } from "./vectorMath.js";
 import { WorkerClient } from "./workerClient.js";
 import { RerankService } from "./rerank.js";
+import { RULE_EXTRACTION_SYSTEM, lintText, buildRuleBlock, parseRuleRecords, normalizeRuleInput } from "./rules.js";
 
 const DEFAULT_TOP_K = 8;
 
@@ -311,6 +312,108 @@ class RagService {
     const profile = this.getProfile(profileId);
     if (!profile) throw Object.assign(new Error("Profile not found"), { statusCode: 404 });
     return profile;
+  }
+
+  // --- Structured writing rules (deterministic guideline compliance) --------
+
+  listRules(profileId, { status } = {}) {
+    this.ensureProfile(profileId);
+    const rows = status
+      ? all(this.db, "SELECT * FROM rules WHERE profile_id = ? AND status = ? ORDER BY created_at ASC", profileId, status)
+      : all(this.db, "SELECT * FROM rules WHERE profile_id = ? ORDER BY created_at ASC", profileId);
+    return rows.map(hydrateRule);
+  }
+
+  upsertRule(profileId, input = {}) {
+    this.ensureProfile(profileId);
+    const at = nowIso();
+    const existing = input.id ? one(this.db, "SELECT * FROM rules WHERE id = ? AND profile_id = ?", input.id, profileId) : null;
+    // Merge provided keys over the existing rule so a partial PATCH (e.g. just
+    // { status: "approved" }) never wipes the other fields.
+    const base = existing ? hydrateRule(existing) : {};
+    const fields = normalizeRuleInput({
+      section: input.section ?? base.section,
+      principle: input.principle ?? base.principle,
+      terms: input.terms ?? base.terms,
+      prefer: input.prefer ?? base.prefer,
+      pairs: input.pairs ?? base.pairs,
+      note: input.note ?? base.note
+    });
+    const status = input.status === "approved" || input.status === "draft" ? input.status : existing?.status || "draft";
+    if (existing) {
+      run(
+        this.db,
+        `UPDATE rules SET section = ?, principle = ?, terms_json = ?, prefer_json = ?, pairs_json = ?, note = ?, status = ?, updated_at = ?
+         WHERE id = ? AND profile_id = ?`,
+        fields.section, fields.principle, JSON.stringify(fields.terms), JSON.stringify(fields.prefer),
+        JSON.stringify(fields.pairs), fields.note, status, at, input.id, profileId
+      );
+      return hydrateRule(one(this.db, "SELECT * FROM rules WHERE id = ?", input.id));
+    }
+    const ruleId = id("rule");
+    run(
+      this.db,
+      `INSERT INTO rules (id, profile_id, source_id, section, principle, terms_json, prefer_json, pairs_json, note, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ruleId, profileId, String(input.sourceId || ""), fields.section, fields.principle,
+      JSON.stringify(fields.terms), JSON.stringify(fields.prefer), JSON.stringify(fields.pairs), fields.note, status, at, at
+    );
+    return hydrateRule(one(this.db, "SELECT * FROM rules WHERE id = ?", ruleId));
+  }
+
+  deleteRule(profileId, ruleId) {
+    this.ensureProfile(profileId);
+    run(this.db, "DELETE FROM rules WHERE id = ? AND profile_id = ?", ruleId, profileId);
+    return { ok: true };
+  }
+
+  // LLM-assisted extraction: read a source's (table-preserved) text, ask the
+  // LLM for rule records, store them as drafts for review.
+  async extractRules(profileId, input = {}) {
+    this.ensureProfile(profileId);
+    const sourceIds = Array.isArray(input.sourceIds) && input.sourceIds.length
+      ? input.sourceIds
+      : all(this.db, "SELECT id FROM sources WHERE profile_id = ?", profileId).map((r) => r.id);
+    if (typeof this.llm.complete !== "function") {
+      throw Object.assign(new Error("현재 LLM 설정으로는 규칙 추출을 할 수 없습니다."), { statusCode: 400 });
+    }
+
+    const windows = [];
+    for (const sourceId of sourceIds) {
+      const text = this._sourceText(sourceId);
+      for (let i = 0; i < text.length && windows.length < 12; i += 3500) {
+        const slice = text.slice(i, i + 3500).trim();
+        if (slice) windows.push({ sourceId, text: slice });
+      }
+    }
+
+    const created = [];
+    for (const window of windows) {
+      let out = "";
+      try {
+        out = await this.llm.complete({ system: RULE_EXTRACTION_SYSTEM, user: window.text });
+      } catch (error) {
+        this.logger?.warn?.(`rule extraction failed: ${error.message}`);
+        continue;
+      }
+      for (const record of parseRuleRecords(out)) {
+        created.push(this.upsertRule(profileId, { ...record, sourceId: window.sourceId, status: "draft" }));
+      }
+    }
+    return { created: created.length, rules: created };
+  }
+
+  _sourceText(sourceId) {
+    const chunks = all(this.db, "SELECT text FROM chunks WHERE source_id = ? ORDER BY chunk_index ASC", sourceId);
+    if (chunks.length) return chunks.map((c) => c.text).join("\n\n");
+    const source = one(this.db, "SELECT pasted_text FROM sources WHERE id = ?", sourceId);
+    return source?.pasted_text || "";
+  }
+
+  lint(profileId, text) {
+    this.ensureProfile(profileId);
+    const rules = this.listRules(profileId, { status: "approved" });
+    return { violations: lintText(text, rules), ruleCount: rules.length };
   }
 
   listSources(profileId) {
@@ -815,6 +918,19 @@ class RagService {
       this.modeStore?.get("general") ||
       this.modeStore?.list()[0] ||
       CHAT_MODES[CHAT_MODES[input.mode] ? input.mode : "general"];
+
+    // Deterministic rule lint for guideline modes: prepend concrete violations
+    // + rule principles to the context so the LLM grounds its ✅/⚠️ + rewrite.
+    let violations = [];
+    if (RULE_MODES.has(mode?.key)) {
+      const rules = this.listRules(profileId, { status: "approved" });
+      if (rules.length) {
+        violations = lintText(query, rules);
+        const block = buildRuleBlock(violations, rules);
+        if (block) envelope.contextText = `${block}\n\n${envelope.contextText}`;
+      }
+    }
+
     const result = await this.llm.generate({
       query,
       messages: input.messages || [],
@@ -841,11 +957,36 @@ class RagService {
       query,
       answer: result.answer,
       citations: envelope.citations,
+      violations,
       provider: result.provider,
       sourceVersion: envelope.sourceVersion,
       created_at: at
     };
   }
+}
+
+const RULE_MODES = new Set(["compliance", "recommend"]);
+
+function hydrateRule(row) {
+  if (!row) return null;
+  const asArray = (value) => {
+    const parsed = safeJson(value);
+    return Array.isArray(parsed) ? parsed : [];
+  };
+  return {
+    id: row.id,
+    profileId: row.profile_id,
+    sourceId: row.source_id,
+    section: row.section,
+    principle: row.principle,
+    terms: asArray(row.terms_json),
+    prefer: asArray(row.prefer_json),
+    pairs: asArray(row.pairs_json),
+    note: row.note,
+    status: row.status,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
 }
 
 function insertSource(db, source) {

@@ -70,6 +70,22 @@ export function createDatabase(dbPath) {
       provider_json TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS rules (
+      id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+      source_id TEXT NOT NULL DEFAULT '',
+      section TEXT NOT NULL DEFAULT '',
+      principle TEXT NOT NULL DEFAULT '',
+      terms_json TEXT NOT NULL DEFAULT '[]',
+      prefer_json TEXT NOT NULL DEFAULT '[]',
+      pairs_json TEXT NOT NULL DEFAULT '[]',
+      note TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'draft',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_rules_profile ON rules(profile_id);
   `);
   migrate(db);
   return db;
