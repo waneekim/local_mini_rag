@@ -6,6 +6,7 @@ import test from "node:test";
 import { createApp } from "../src/app.js";
 import { EmbeddingService, localNgramEmbedding } from "../src/rag/embedding.js";
 import { LlmProvider, parseJsonObject } from "../src/rag/llmProvider.js";
+import { RerankService } from "../src/rag/rerank.js";
 import { normalizeUploadedFileName, sanitizeFileName } from "../src/rag/sanitize.js";
 import { cosineSimilarity } from "../src/rag/vectorMath.js";
 
@@ -115,6 +116,64 @@ test("non-instruct embedding models leave query text unchanged", async () => {
   });
   await service.embed(["hello"], { mode: "query" });
   assert.equal(bodies[0].input[0], "hello");
+});
+
+test("http reranker posts query+documents and normalizes relevance_score", async () => {
+  const calls = [];
+  const service = new RerankService({
+    url: "http://rerank.local/v1/rerank",
+    model: "qwen3-reranker",
+    fetchFn: async (url, options) => {
+      calls.push({ url, body: JSON.parse(options.body) });
+      return {
+        ok: true,
+        json: async () => ({ results: [{ index: 1, relevance_score: 0.9 }, { index: 0, relevance_score: 0.1 }] })
+      };
+    }
+  });
+  assert.equal(service.enabled, true);
+  const out = await service.rerank("환불 며칠?", ["점심 메뉴", "환불은 7일 이내"]);
+  assert.equal(calls[0].url, "http://rerank.local/v1/rerank");
+  assert.deepEqual(calls[0].body.documents, ["점심 메뉴", "환불은 7일 이내"]);
+  const byIndex = Object.fromEntries(out.map((r) => [r.index, r.score]));
+  assert.equal(byIndex[1], 0.9);
+  assert.equal(byIndex[0], 0.1);
+});
+
+test("search applies the reranker order over embedding order", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-rerank-"));
+  // Fake reranker: always ranks the SECOND candidate first.
+  const reranker = {
+    enabled: true,
+    candidates: 24,
+    minScore: null,
+    rerank: async (query, docs) => docs.map((_, index) => ({ index, score: index === 1 ? 1 : 0.01 }))
+  };
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    reranker,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      generate: async ({ envelope }) => ({ answer: "ok", provider: {}, raw: {} })
+    }
+  });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    await post(app, `/api/profiles/${p.id}/sources/text`, { title: "환불 정책", text: "고객 환불은 구매 후 7일 이내에 처리됩니다. 영수증이 필요합니다." });
+    await post(app, `/api/profiles/${p.id}/sources/text`, { title: "배송 안내", text: "배송은 보통 2~3일 소요되며 도서산간은 추가됩니다." });
+    const job = await post(app, `/api/profiles/${p.id}/index`, {});
+    await waitForJob(app, job.id);
+
+    const search = await post(app, `/api/profiles/${p.id}/search`, { query: "환불 규정" });
+    assert.equal(search.reranked, true);
+    assert.equal(search.hits.length >= 2, true);
+    // The fake reranker forces the 2nd embedding candidate to the top.
+    assert.equal(search.hits[0].score, 1);
+  } finally {
+    await app.close();
+  }
 });
 
 test("uploaded Korean filenames survive multipart mojibake", () => {
