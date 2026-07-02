@@ -921,10 +921,13 @@ function walkDir(dir, relPrefix, out) {
   }
 }
 
-function htmlToText(html) {
+export function htmlToText(html) {
   let s = String(html || "").replace(/<(script|style|noscript|template|svg)[\s\S]*?<\/\1>/gi, " ");
   const titleMatch = s.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   const title = titleMatch ? decodeEntities(titleMatch[1]).replace(/\s+/g, " ").trim() : "";
+  // Convert tables to labeled rows BEFORE stripping tags, so structured guides
+  // (추천 ↔ 피해야 할 말 등) keep their column pairing in one line/chunk.
+  s = s.replace(/<table[\s\S]*?<\/table>/gi, (table) => `\n\n${tableToText(table)}\n\n`);
   s = s.replace(/<\/(p|div|li|h[1-6]|tr|section|article|header|footer|blockquote)>/gi, "\n");
   s = s.replace(/<br\s*\/?>/gi, "\n");
   s = s.replace(/<[^>]+>/g, " ");
@@ -934,6 +937,41 @@ function htmlToText(html) {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   return { title, text: s };
+}
+
+// Turn an HTML <table> into readable rows. With a header row (or short
+// label-like first row) each cell becomes "헤더: 값", otherwise cells are
+// joined with " · ". Keeps recommend/avoid pairs together for retrieval.
+function tableToText(tableHtml) {
+  const rows = [...String(tableHtml).matchAll(/<tr[\s\S]*?<\/tr>/gi)]
+    .map((match) => {
+      const cells = [...match[0].matchAll(/<(t[dh])\b[^>]*>([\s\S]*?)<\/\1>/gi)].map((c) => cleanCell(c[2]));
+      return { cells, hasTh: /<th\b/i.test(match[0]) };
+    })
+    .filter((row) => row.cells.some(Boolean));
+  if (!rows.length) return "";
+
+  const first = rows[0];
+  const useHeader = first.hasTh || (rows.length > 1 && first.cells.every((c) => c && c.length <= 12));
+  const headers = useHeader ? first.cells : null;
+  const body = headers ? rows.slice(1) : rows;
+
+  const lines = body.map((row) => {
+    if (headers) {
+      return row.cells
+        .map((cell, i) => (headers[i] ? `${headers[i]}: ${cell}` : cell))
+        .filter(Boolean)
+        .join(" · ");
+    }
+    return row.cells.filter(Boolean).join(" · ");
+  });
+  return lines.filter(Boolean).join("\n");
+}
+
+function cleanCell(html) {
+  return decodeEntities(String(html).replace(/<[^>]+>/g, " "))
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function decodeEntities(text) {

@@ -7,6 +7,7 @@ import { createApp } from "../src/app.js";
 import { EmbeddingService, localNgramEmbedding } from "../src/rag/embedding.js";
 import { LlmProvider, parseJsonObject } from "../src/rag/llmProvider.js";
 import { RerankService } from "../src/rag/rerank.js";
+import { htmlToText } from "../src/rag/ragService.js";
 import { normalizeUploadedFileName, sanitizeFileName } from "../src/rag/sanitize.js";
 import { cosineSimilarity } from "../src/rag/vectorMath.js";
 
@@ -202,6 +203,22 @@ test("search falls back to embedding order when the reranker gives no signal", a
   } finally {
     await app.close();
   }
+});
+
+test("html extraction keeps recommend/avoid table pairs on one line", () => {
+  const html = `<html><body>
+    <h2>보이스앤톤</h2>
+    <p>사용자는 '나'로 지칭한다.</p>
+    <table>
+      <tr><th>추천</th><th>피해야 할 말</th></tr>
+      <tr><td>내 폰 찾기</td><td>사용자 폰 찾기</td></tr>
+      <tr><td>내 모습을 추가로 등록하세요</td><td>사용자의 모습을 추가로 등록하세요</td></tr>
+    </table>
+  </body></html>`;
+  const { text } = htmlToText(html);
+  assert.match(text, /추천: 내 폰 찾기 · 피해야 할 말: 사용자 폰 찾기/);
+  assert.match(text, /추천: 내 모습을 추가로 등록하세요 · 피해야 할 말: 사용자의 모습을 추가로 등록하세요/);
+  assert.match(text, /사용자는 '나'로 지칭한다\./);
 });
 
 test("uploaded Korean filenames survive multipart mojibake", () => {
