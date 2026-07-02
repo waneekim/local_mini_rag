@@ -17,6 +17,26 @@ export class EmbeddingService {
     this.apiKey = options.apiKey || process.env.EMBEDDINGS_API_KEY || process.env.LLM_API_KEY || "";
     this.backend = options.backend || process.env.RAG_EMBEDDING_BACKEND || (this.embeddingsUrl ? "http" : "local-ngram");
     this.model = options.model || process.env.EMBEDDINGS_MODEL || process.env.RAG_EMBEDDING_MODEL || "intfloat/multilingual-e5-small";
+    // Asymmetric retrieval prompts. Instruction-aware models (Qwen3-Embedding,
+    // e5-instruct) expect an instruction on the QUERY only; documents stay raw.
+    // e5/bge use fixed "query:"/"passage:" prefixes on both sides. Explicit env
+    // wins; otherwise we pick a sensible default from the model name.
+    const style = defaultPromptStyle(this.model);
+    this.queryInstruction = firstDefined(options.queryInstruction, process.env.RAG_EMBED_QUERY_INSTRUCTION, style.queryInstruction);
+    this.queryPrefix = firstDefined(options.queryPrefix, process.env.RAG_EMBED_QUERY_PREFIX, style.queryPrefix);
+    this.passagePrefix = firstDefined(options.passagePrefix, process.env.RAG_EMBED_PASSAGE_PREFIX, style.passagePrefix);
+  }
+
+  // Apply the query/passage prompt for instruction-aware or prefix-based models.
+  // Only used for the http backend; local-ngram and python-e5 handle mode themselves.
+  formatForEmbedding(texts, mode) {
+    if (mode === "query") {
+      if (this.queryInstruction) return texts.map((t) => `Instruct: ${this.queryInstruction}\nQuery: ${t}`);
+      if (this.queryPrefix) return texts.map((t) => `${this.queryPrefix}${t}`);
+    } else if (this.passagePrefix) {
+      return texts.map((t) => `${this.passagePrefix}${t}`);
+    }
+    return texts;
   }
 
   describe() {
@@ -24,6 +44,7 @@ export class EmbeddingService {
       backend: this.backend,
       model: this.model,
       dimensions: this.backend === "http" ? this.configuredDimensions ?? "auto" : this.dimensions,
+      queryPrompt: this.queryInstruction ? "instruction" : this.queryPrefix ? "prefix" : "none",
       url: this.embeddingsUrl ? redactUrl(this.embeddingsUrl) : "",
       note:
         this.backend === "local-ngram"
@@ -37,7 +58,7 @@ export class EmbeddingService {
   async embed(texts, options = {}) {
     if (!Array.isArray(texts)) throw new Error("embed() expects an array");
     if (this.backend === "http") {
-      return this.embedWithHttp(texts);
+      return this.embedWithHttp(this.formatForEmbedding(texts, options.mode || "passage"));
     }
     if (this.backend === "python-e5") {
       return this.embedWithPython(texts, options.mode || "passage");
@@ -122,6 +143,30 @@ export class EmbeddingService {
     }
     return embeddings;
   }
+}
+
+// Default query/passage prompting inferred from the embedding model name.
+// Qwen3-Embedding & e5-instruct: instruction on the query only (documents raw),
+// so this is backward compatible with passages already embedded without a prompt.
+// Plain e5 / bge-style prefixes are left off by default to avoid invalidating
+// existing document vectors; set RAG_EMBED_*_PREFIX explicitly + re-index to use them.
+export function defaultPromptStyle(model) {
+  const name = String(model || "").toLowerCase();
+  const empty = { queryInstruction: "", queryPrefix: "", passagePrefix: "" };
+  if (/qwen3.*emb|qwen3-embedding/.test(name)) {
+    return { ...empty, queryInstruction: "Given a search query, retrieve relevant passages that answer the query" };
+  }
+  if (/e5.*instruct|instruct.*e5/.test(name)) {
+    return { ...empty, queryInstruction: "Given a search query, retrieve relevant passages that answer the query" };
+  }
+  return empty;
+}
+
+function firstDefined(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null) return value;
+  }
+  return "";
 }
 
 export function localNgramEmbedding(text, dimensions = DEFAULT_DIMENSIONS) {

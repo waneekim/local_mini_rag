@@ -653,7 +653,16 @@ class RagService {
     if (!chunks.length) throw new Error("No indexable text extracted");
 
     run(this.db, "UPDATE sources SET status = ?, updated_at = ? WHERE id = ?", "embedding", nowIso(), source.id);
-    const vectors = await this.embeddings.embed(chunks.map((chunk) => chunk.text), { mode: "passage" });
+    // Contextual retrieval: embed each chunk together with a short header (source
+    // title + locator/section) so short queries match the right document, but
+    // store the original text so citations stay clean.
+    const vectors = await this.embeddings.embed(
+      chunks.map((chunk) => {
+        const header = chunkHeader(source, chunk.locator);
+        return header ? `[${header}]\n${chunk.text}` : chunk.text;
+      }),
+      { mode: "passage" }
+    );
 
     const at = nowIso();
     chunks.forEach((chunk, index) => {
@@ -694,6 +703,9 @@ class RagService {
     const query = String(input.query || "").trim();
     if (!query) throw Object.assign(new Error("Query is required"), { statusCode: 400 });
     const topK = clamp(Number(input.topK || DEFAULT_TOP_K), 1, 30);
+    // Relevance floor: below this combined score a hit is treated as noise and
+    // dropped, so the LLM gets "no context" instead of unrelated chunks. 0 = off.
+    const minScore = Number(input.minScore ?? process.env.RAG_MIN_SCORE ?? 0);
     const [queryVector] = await this.embeddings.embed([query], { mode: "query" });
     const chunks = all(
       this.db,
@@ -723,7 +735,7 @@ class RagService {
           keywordScore: Number(keywordScore.toFixed(6))
         };
       })
-      .filter((hit) => hit.score > 0)
+      .filter((hit) => hit.score > 0 && hit.score >= minScore)
       .sort((a, b) => b.score - a.score);
 
     return {
@@ -973,6 +985,20 @@ function sourceVersion(db, profileId) {
 function nonEmpty(value, fallback) {
   const text = String(value || "").trim();
   return text || fallback;
+}
+
+// Short "source · location" header prepended to a chunk's embed text so that
+// short queries retrieve from the right document/section (contextual chunking).
+function chunkHeader(source, locator = {}) {
+  const title = source.title || source.file_name || "";
+  const parts = [];
+  if (title) parts.push(title);
+  if (locator.relativePath && locator.relativePath !== title) parts.push(locator.relativePath);
+  if (locator.page) parts.push(`p.${locator.page}`);
+  if (locator.slide) parts.push(`slide ${locator.slide}`);
+  if (locator.sheet) parts.push(`sheet ${locator.sheet}`);
+  if (locator.heading) parts.push(String(locator.heading));
+  return parts.filter(Boolean).join(" · ");
 }
 
 function normalizeBaseUrl(value) {
