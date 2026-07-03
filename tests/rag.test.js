@@ -75,6 +75,56 @@ test("chat posts to {baseUrl}/chat/completions and merges extra_body at top leve
   }
 });
 
+test("generate sends pasted images as image_url parts and picks the vision model", async () => {
+  const calls = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, json: async () => ({ choices: [{ message: { content: "보입니다" } }] }) };
+  };
+  try {
+    const provider = new LlmProvider({ baseUrl: "http://llm.local/v1", model: "text-model", visionModel: "vl-model" });
+    const img = "data:image/png;base64,AAAA";
+    const result = await provider.generate({ query: "이거 뭐야?", envelope: { contextText: "", citations: [] }, images: [img] });
+    assert.equal(result.answer, "보입니다");
+    const body = JSON.parse(calls[0].options.body);
+    assert.equal(body.model, "vl-model"); // vision model used when images present
+    const content = body.messages[1].content;
+    assert.equal(Array.isArray(content), true);
+    assert.equal(content.some((p) => p.type === "image_url" && p.image_url.url === img), true);
+    assert.equal(content.some((p) => p.type === "text"), true);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("chat accepts an image-only message and forwards the images to the model", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-img-"));
+  let seen = null;
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      generate: async ({ query, images }) => {
+        seen = { query, images };
+        return { answer: "ok", provider: {}, raw: {} };
+      }
+    }
+  });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    const img = "data:image/png;base64,AAAA";
+    const res = await post(app, `/api/profiles/${p.id}/chat`, { images: [img] }); // no text query
+    assert.equal(res.answer, "ok");
+    assert.deepEqual(seen.images, [img]);
+    assert.equal(seen.query, "");
+  } finally {
+    await app.close();
+  }
+});
+
 test("parseJsonObject accepts objects/JSON and rejects junk", () => {
   assert.deepEqual(parseJsonObject({ a: 1 }), { a: 1 });
   assert.deepEqual(parseJsonObject('{"chat_template_kwargs":{"enable_thinking":false}}'), {

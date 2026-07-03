@@ -79,6 +79,7 @@ function App() {
   const [folderTree, setFolderTree] = useState(() => localStorage.getItem("rag.folderTree") === "1");
   const [editingMode, setEditingMode] = useState(null); // mode being edited/created in settings
   const [crop, setCrop] = useState(null); // { src, w, h } captured screenshot to crop
+  const [attachments, setAttachments] = useState([]); // pasted/captured image data URLs sent with the next prompt
   const [dragRect, setDragRect] = useState(null); // selection rect in client coords
   const [manualCompact, setManualCompact] = useState(() => {
     const p = new URLSearchParams(window.location.search).get("compact");
@@ -232,7 +233,7 @@ function App() {
       const file = item.getAsFile();
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = () => extractFromImage(reader.result);
+      reader.onload = () => attachImage(reader.result);
       reader.readAsDataURL(file);
     }
     window.addEventListener("click", onClick);
@@ -634,31 +635,23 @@ function App() {
     }
   }
 
-  // ── Screenshot → Vision LLM → prompt ──
+  // ── Pasted / captured image → attach to the next prompt ──
+  // The image rides along with the message and is shown to the vision model
+  // together with the text (no pre-OCR). Displayed as a chip above the composer.
 
-  async function extractFromImage(dataUrl) {
-    setBusy(true);
-    setStatus("이미지에서 텍스트 추출 중… (수 초~수십 초)");
+  async function attachImage(dataUrl) {
     try {
       const image = await downscaleImage(dataUrl);
-      const { text } = await fetchJson("/api/vision/extract", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ image })
-      });
-      if (text) {
-        setQuery((q) => (q ? `${q}\n${text}` : text));
-        setStatus("텍스트 추출됨 · 검토 후 전송");
-        setTimeout(() => inputRef.current?.focus(), 0);
-      } else {
-        setStatus("추출된 텍스트가 없습니다");
-      }
+      setAttachments((prev) => [...prev, image]);
+      setStatus("이미지 첨부됨 · 프롬프트와 함께 전송됩니다");
+      setTimeout(() => inputRef.current?.focus(), 0);
     } catch (e) {
-      window.alert(`텍스트 추출 오류: ${e.message}`);
-      setStatus("추출 오류");
-    } finally {
-      setBusy(false);
+      setStatus(`이미지 첨부 오류: ${e.message}`);
     }
+  }
+
+  function removeAttachment(index) {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
   }
 
   async function captureScreenshot() {
@@ -720,7 +713,7 @@ function App() {
     c.width = Math.round(sw);
     c.height = Math.round(sh);
     c.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
-    await extractFromImage(c.toDataURL("image/png"));
+    await attachImage(c.toDataURL("image/png"));
   }
 
 
@@ -1175,7 +1168,7 @@ function App() {
 
   async function runChat() {
     const text = query.trim();
-    if (!text || busy) return;
+    if ((!text && !attachments.length) || busy) return;
     if (text.startsWith("/")) {
       setQuery("");
       setSuggest(null);
@@ -1185,16 +1178,18 @@ function App() {
     const { profileId, agentName, cleanText } = parseMention(text);
     const targetId = profileId || activeProfileId;
     if (!targetId) return;
+    const images = attachments;
     setQuery("");
+    setAttachments([]);
     setSuggest(null);
-    await sendMessage(cleanText || text, chatMode, targetId, agentName);
+    await sendMessage(cleanText || text, chatMode, targetId, agentName, images);
   }
 
-  async function sendMessage(text, mode, targetId = activeProfileId, agentName = "") {
+  async function sendMessage(text, mode, targetId = activeProfileId, agentName = "", images = []) {
     if (!targetId) return;
     const modeLabel = modes.find((m) => m.key === mode)?.label;
     const crossAgent = agentName && targetId !== activeProfileId ? agentName : "";
-    const userMsg = { id: String(Date.now()), role: "user", content: text, mode, modeLabel, agentName: crossAgent };
+    const userMsg = { id: String(Date.now()), role: "user", content: text, mode, modeLabel, agentName: crossAgent, images };
     setMessages((prev) => [...prev, userMsg]);
     setBusy(true);
     setStatus("답변 생성 중");
@@ -1202,7 +1197,7 @@ function App() {
       const payload = await fetchJson(`/api/profiles/${targetId}/chat`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ query: text, topK: 4, mode })
+        body: JSON.stringify({ query: text, topK: 4, mode, images })
       });
       const cites = (payload.citations || []).map((c) => ({ ...c, query: text }));
       const used = new Set([...String(payload.answer).matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
@@ -2210,9 +2205,18 @@ function App() {
                       {msg.role === "user" && msg.modeLabel && msg.mode !== "general" && (
                         <span className="bubble-mode">{msg.modeLabel}</span>
                       )}
-                      <p className="bubble-text">
-                        {msg.role === "assistant" ? renderAnswerText(msg.content, msg.citations, openCitationPopup) : msg.content}
-                      </p>
+                      {msg.role === "user" && msg.images?.length ? (
+                        <div className="bubble-images">
+                          {msg.images.map((src, i) => (
+                            <img key={i} src={src} alt={`첨부 ${i + 1}`} />
+                          ))}
+                        </div>
+                      ) : null}
+                      {(msg.content || msg.role === "assistant") && (
+                        <p className="bubble-text">
+                          {msg.role === "assistant" ? renderAnswerText(msg.content, msg.citations, openCitationPopup) : msg.content}
+                        </p>
+                      )}
                       {msg.role === "assistant" && msg.violations?.length ? (
                         <div className="msg-violations">
                           {msg.violations.map((v, i) => (
@@ -2303,6 +2307,18 @@ function App() {
                     ))}
                   </div>
                 )}
+                {attachments.length > 0 && (
+                  <div className="attach-row">
+                    {attachments.map((src, i) => (
+                      <div key={i} className="attach-chip">
+                        <img src={src} alt={`첨부 ${i + 1}`} />
+                        <button type="button" className="attach-x" title="첨부 제거" onClick={() => removeAttachment(i)}>
+                          <X size={11} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="ta-wrap" style={{ height: inputHeight }}>
                   <div className="ta-highlight" ref={highlightRef} aria-hidden="true">
                     {renderInputHighlight(query, profiles)}
@@ -2329,7 +2345,7 @@ function App() {
                     <button className="tool" type="button" title="폴더 추가" onClick={() => pickFolder(activeProfileId)}><FolderUp size={16} /></button>
                     <button className="tool" type="button" title="텍스트 추가" onClick={() => openTextDialog(activeProfileId)}><FileText size={16} /></button>
                     <button className="tool" type="button" title="URL 추가" onClick={() => openUrlDialog(activeProfileId)}><Link size={16} /></button>
-                    <button className="tool" type="button" title="스크린샷 검증 · 클릭=화면 공유 후 영역선택 / 또는 ⌃⌘⇧4로 캡처 후 ⌘V 붙여넣기" onClick={captureScreenshot}><Camera size={16} /></button>
+                    <button className="tool" type="button" title="이미지 첨부 · 클릭=화면 공유 후 영역선택 / 또는 스크린샷 복사 후 ⌘V 붙여넣기 → 프롬프트와 함께 비전 모델로 전송" onClick={captureScreenshot}><Camera size={16} /></button>
                     <span className="tool-sep" />
                     <button
                       className={`tool toggle ${autoIndex ? "on" : ""}`}

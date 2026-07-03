@@ -48,6 +48,7 @@ class RagService {
       provider: llm.provider || undefined,
       baseUrl: llm.baseUrl || undefined,
       model: llm.model || undefined,
+      visionModel: llm.visionModel || undefined,
       apiKey: llm.apiKey || undefined
     });
     const emb = settings.embedding || {};
@@ -1308,8 +1309,16 @@ class RagService {
 
   async chat(profileId, input) {
     const query = String(input.query || "").trim();
-    if (!query) throw Object.assign(new Error("Query is required"), { statusCode: 400 });
-    const envelope = await this.buildContext(profileId, input);
+    // Pasted images ride along as data URLs and are shown to the vision model
+    // together with the prompt (not pre-OCR'd). A message may be image-only.
+    const images = Array.isArray(input.images)
+      ? input.images.filter((s) => typeof s === "string" && s.startsWith("data:"))
+      : [];
+    if (!query && !images.length) throw Object.assign(new Error("Query is required"), { statusCode: 400 });
+    // Retrieval is driven by the text query; an image-only message skips it.
+    const envelope = query
+      ? await this.buildContext(profileId, input)
+      : { profileId, query: "", contextText: "", hits: [], citations: [], timings: {}, sourceVersion: sourceVersion(this.db, profileId) };
     const mode =
       this.modeStore?.get(input.mode) ||
       this.modeStore?.get("general") ||
@@ -1319,7 +1328,7 @@ class RagService {
     // Deterministic rule lint for guideline modes: prepend concrete violations
     // + rule principles to the context so the LLM grounds its ✅/⚠️ + rewrite.
     let violations = [];
-    if (RULE_MODES.has(mode?.key)) {
+    if (query && RULE_MODES.has(mode?.key)) {
       const rules = this.listRules(profileId, { status: "approved" });
       if (rules.length) {
         violations = lintText(query, rules);
@@ -1329,7 +1338,7 @@ class RagService {
     }
 
     // Self-improving memory: prepend guidance recalled from similar past feedback.
-    const memory = await this.recallFeedback(profileId, query);
+    const memory = query ? await this.recallFeedback(profileId, query) : { block: "", used: 0 };
     if (memory.block) envelope.contextText = `${memory.block}\n\n${envelope.contextText}`;
 
     const tGen = performance.now();
@@ -1337,7 +1346,8 @@ class RagService {
       query,
       messages: input.messages || [],
       envelope,
-      system: mode?.system
+      system: mode?.system,
+      images
     });
     const answerMs = Math.round(performance.now() - tGen);
     const timings = { ...(envelope.timings || {}), answerMs };
