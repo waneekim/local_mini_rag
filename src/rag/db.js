@@ -132,6 +132,39 @@ function migrate(db) {
   if (!sourceColumns.includes("preprocess_hash")) {
     db.exec("ALTER TABLE sources ADD COLUMN preprocess_hash TEXT NOT NULL DEFAULT ''");
   }
+
+  // Hierarchy columns materialized onto chunks so retrieval can scope/boost by
+  // location: folder_path from the source's relative path (계약서/2024/벤더) and
+  // heading_path from the structured Markdown headings (대제목 > 소제목).
+  const chunkColumns = db.prepare("PRAGMA table_info(chunks)").all().map((c) => c.name);
+  const addedFolder = !chunkColumns.includes("folder_path");
+  const addedHeading = !chunkColumns.includes("heading_path");
+  if (addedFolder) db.exec("ALTER TABLE chunks ADD COLUMN folder_path TEXT NOT NULL DEFAULT ''");
+  if (addedHeading) db.exec("ALTER TABLE chunks ADD COLUMN heading_path TEXT NOT NULL DEFAULT ''");
+  if (addedFolder || addedHeading) backfillChunkPaths(db);
+  if (addedFolder) db.exec("CREATE INDEX IF NOT EXISTS idx_chunks_folder ON chunks(profile_id, folder_path)");
+}
+
+// One-time backfill for existing chunks: derive folder_path from the joined
+// source's relative_path and heading_path from the chunk's stored locator JSON.
+function backfillChunkPaths(db) {
+  const rows = db
+    .prepare("SELECT chunks.id AS id, chunks.locator_json AS locator_json, sources.relative_path AS relative_path FROM chunks JOIN sources ON sources.id = chunks.source_id")
+    .all();
+  const update = db.prepare("UPDATE chunks SET folder_path = ?, heading_path = ? WHERE id = ?");
+  for (const row of rows) {
+    const rel = String(row.relative_path || "");
+    const cut = rel.lastIndexOf("/");
+    const folder = cut > 0 ? rel.slice(0, cut) : "";
+    let heading = "";
+    try {
+      const loc = JSON.parse(row.locator_json || "{}");
+      if (typeof loc.heading === "string") heading = loc.heading;
+    } catch {
+      // leave heading empty on malformed JSON
+    }
+    if (folder || heading) update.run(folder, heading, row.id);
+  }
 }
 
 export function one(db, sql, ...params) {

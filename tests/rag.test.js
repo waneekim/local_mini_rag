@@ -462,6 +462,48 @@ test("folder tree: useTree adds a queryable structure source, off by default", a
   }
 });
 
+test("folder scoping: drill-down restricts retrieval and breadcrumbs the hit", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-scope-"));
+  const srcDir = await mkdtemp(join(tmpdir(), "scope-src-"));
+  await mkdir(join(srcDir, "contracts", "2024"), { recursive: true });
+  await mkdir(join(srcDir, "contracts", "2023"), { recursive: true });
+  await writeFile(join(srcDir, "contracts", "2024", "vendor.md"), "2024년 벤더 계약 해지 조건은 30일 전 통보입니다.");
+  await writeFile(join(srcDir, "contracts", "2023", "vendor.md"), "2023년 벤더 계약 해지 조건은 60일 전 통보입니다.");
+
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: { describe: () => ({ provider: "test", model: "mock" }), generate: async () => ({ answer: "ok", provider: {}, raw: {} }) }
+  });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    await post(app, `/api/profiles/${p.id}/sources/path`, { path: srcDir });
+    const job = await post(app, `/api/profiles/${p.id}/index`, {});
+    await waitForJob(app, job.id);
+
+    // Folders are enumerable for the drill-down UI.
+    const folders = await get(app, `/api/profiles/${p.id}/folders`);
+    const rootName = srcDir.split("/").pop();
+    assert.equal(folders.some((f) => f.path === `${rootName}/contracts/2024`), true);
+
+    // Unscoped: both years are candidates.
+    const wide = await post(app, `/api/profiles/${p.id}/search`, { query: "벤더 계약 해지 조건" });
+    assert.equal(wide.hits.some((h) => h.folderPath.endsWith("2023")), true);
+    assert.equal(wide.hits.some((h) => h.folderPath.endsWith("2024")), true);
+
+    // Scoped via the folder: token: only the 2024 subtree survives, and the hit
+    // carries a breadcrumb through folder > document > (section).
+    const scoped = await post(app, `/api/profiles/${p.id}/search`, { query: `folder:${rootName}/contracts/2024 해지 조건` });
+    assert.equal(scoped.scope, `${rootName}/contracts/2024`);
+    assert.equal(scoped.hits.length > 0, true);
+    assert.equal(scoped.hits.every((h) => h.folderPath === `${rootName}/contracts/2024`), true);
+    assert.match(scoped.hits[0].breadcrumb, /contracts > 2024 > vendor\.md/);
+  } finally {
+    await app.close();
+  }
+});
+
 test("central library: publish, export, and import into a second instance", async () => {
   const hostDir = await mkdtemp(join(tmpdir(), "rag-host-"));
   const localDir = await mkdtemp(join(tmpdir(), "rag-local-"));

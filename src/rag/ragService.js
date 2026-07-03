@@ -239,9 +239,11 @@ class RagService {
 
     // Map remote source ids -> new local ids and copy source rows (no files).
     const sourceIdMap = new Map();
+    const sourceRelMap = new Map();
     for (const s of payload.sources || []) {
       const newSourceId = id("source");
       sourceIdMap.set(s.refId, newSourceId);
+      sourceRelMap.set(s.refId, s.relative_path || "");
       insertSource(this.db, {
         id: newSourceId,
         profile_id: newProfileId,
@@ -277,8 +279,8 @@ class RagService {
     chunks.forEach((c, index) => {
       run(
         this.db,
-        `INSERT INTO chunks (id, profile_id, source_id, chunk_index, text, locator_json, embedding_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO chunks (id, profile_id, source_id, chunk_index, text, locator_json, embedding_json, folder_path, heading_path, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         id("chunk"),
         newProfileId,
         sourceIdMap.get(c.sourceRefId),
@@ -286,6 +288,8 @@ class RagService {
         c.text,
         c.locator_json || "{}",
         compatible ? c.embedding_json : JSON.stringify(vectors[index]),
+        folderPathOf(sourceRelMap.get(c.sourceRefId)),
+        headingPathOf(c.locator_json),
         at
       );
     });
@@ -491,6 +495,20 @@ class RagService {
       .slice(0, topK);
     if (!scored.length) return { block: "", used: 0 };
     return { block: buildFeedbackBlock(scored.map((s) => s.row)), used: scored.length };
+  }
+
+  // Distinct indexed folder paths (with chunk counts) for drill-down/scoping UI.
+  listFolders(profileId) {
+    this.ensureProfile(profileId);
+    return all(
+      this.db,
+      `SELECT folder_path AS path, COUNT(*) AS chunkCount
+       FROM chunks
+       WHERE profile_id = ? AND folder_path <> ''
+       GROUP BY folder_path
+       ORDER BY folder_path ASC`,
+      profileId
+    );
   }
 
   listSources(profileId) {
@@ -736,8 +754,8 @@ class RagService {
     for (const chunk of chunks) {
       run(
         this.db,
-        `INSERT INTO chunks (id, profile_id, source_id, chunk_index, text, locator_json, embedding_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO chunks (id, profile_id, source_id, chunk_index, text, locator_json, embedding_json, folder_path, heading_path, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         id("chunk"),
         targetProfileId,
         newId,
@@ -745,6 +763,8 @@ class RagService {
         chunk.text,
         chunk.locator_json,
         chunk.embedding_json,
+        chunk.folder_path || folderPathOf(copy.relative_path),
+        chunk.heading_path || headingPathOf(chunk.locator_json),
         chunk.created_at
       );
     }
@@ -1093,11 +1113,12 @@ class RagService {
     );
 
     const at = nowIso();
+    const folderPath = folderPathOf(source.relative_path);
     chunks.forEach((chunk, index) => {
       run(
         this.db,
-        `INSERT INTO chunks (id, profile_id, source_id, chunk_index, text, locator_json, embedding_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO chunks (id, profile_id, source_id, chunk_index, text, locator_json, embedding_json, folder_path, heading_path, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         id("chunk"),
         source.profile_id,
         source.id,
@@ -1105,6 +1126,8 @@ class RagService {
         chunk.text,
         JSON.stringify({ ...chunk.locator, metadata: chunk.metadata }),
         JSON.stringify(vectors[index]),
+        folderPath,
+        typeof chunk.locator?.heading === "string" ? chunk.locator.heading : "",
         at
       );
     });
@@ -1129,7 +1152,16 @@ class RagService {
 
   async search(profileId, input) {
     this.ensureProfile(profileId);
-    const query = String(input.query || "").trim();
+    let query = String(input.query || "").trim();
+    if (!query) throw Object.assign(new Error("Query is required"), { statusCode: 400 });
+    // Drill-down: an explicit `scope`, or a leading `folder:<path>` token in the
+    // query, restricts retrieval to one folder subtree ("의미있게 찾아 들어가기").
+    let scope = String(input.scope || "").trim().replace(/\/+$/, "");
+    const scopeToken = /^\s*folder:("[^"]+"|\S+)\s+/i.exec(query);
+    if (scopeToken) {
+      scope = scopeToken[1].replace(/^"|"$/g, "").replace(/\/+$/, "");
+      query = query.slice(scopeToken[0].length).trim();
+    }
     if (!query) throw Object.assign(new Error("Query is required"), { statusCode: 400 });
     const topK = clamp(Number(input.topK || DEFAULT_TOP_K), 1, 30);
     // Relevance floor: below this combined score a hit is treated as noise and
@@ -1148,23 +1180,36 @@ class RagService {
       profileId
     );
 
+    const inScope = (folder) => !scope || folder === scope || String(folder).startsWith(`${scope}/`);
+
     const scored = chunks
+      .filter((chunk) => inScope(chunk.folder_path || ""))
       .map((chunk) => {
         const vector = JSON.parse(chunk.embedding_json);
         const vectorScore = cosineSimilarity(queryVector, vector);
         const keywordScore = lexicalScore(query, chunk.text);
+        // Path boost: reward chunks whose folder/heading names echo the query,
+        // so a well-categorised tree nudges the right section up. Empty paths
+        // (plain text sources) contribute nothing, keeping legacy behaviour.
+        const pathText = `${(chunk.folder_path || "").replace(/\//g, " ")} ${(chunk.heading_path || "").replace(/>/g, " ")}`.trim();
+        const pathScore = pathText ? lexicalScore(query, pathText) : 0;
+        const combined = vectorScore * 0.8 + keywordScore * 0.2 + pathScore * 0.15;
         return {
           id: chunk.id,
           sourceId: chunk.source_id,
           title: chunk.title,
           fileName: chunk.file_name,
           relativePath: chunk.relative_path,
+          folderPath: chunk.folder_path || "",
+          headingPath: chunk.heading_path || "",
+          breadcrumb: breadcrumbOf(chunk),
           sourceKind: chunk.kind,
           text: chunk.text,
           locator: safeJson(chunk.locator_json),
-          score: Number((vectorScore * 0.8 + keywordScore * 0.2).toFixed(6)),
+          score: Number(combined.toFixed(6)),
           vectorScore: Number(vectorScore.toFixed(6)),
-          keywordScore: Number(keywordScore.toFixed(6))
+          keywordScore: Number(keywordScore.toFixed(6)),
+          pathScore: Number(pathScore.toFixed(6))
         };
       })
       .filter((hit) => hit.score > 0 && hit.score >= minScore)
@@ -1186,6 +1231,7 @@ class RagService {
     return {
       profileId,
       query,
+      scope: scope || "",
       topK,
       reranked: rr.reranked,
       timings,
@@ -1231,16 +1277,21 @@ class RagService {
       chunkId: hit.id,
       sourceId: hit.sourceId,
       title: hit.title,
+      breadcrumb: hit.breadcrumb || "",
+      folderPath: hit.folderPath || "",
+      headingPath: hit.headingPath || "",
       locator: hit.locator,
       score: hit.score,
       excerpt: excerpt(hit.text),
       text: hit.text
     }));
 
+    // Prefer the full breadcrumb (folder > document > section) as the citation
+    // header so the LLM knows exactly where each passage sits in the hierarchy.
     const contextText = search.hits
       .map((hit, index) => {
-        const locator = formatLocator(hit.locator);
-        return `[${index + 1}] ${hit.title}${locator ? ` (${locator})` : ""}\n${hit.text}`;
+        const label = hit.breadcrumb || `${hit.title}${formatLocator(hit.locator) ? ` (${formatLocator(hit.locator)})` : ""}`;
+        return `[${index + 1}] ${label}\n${hit.text}`;
       })
       .join("\n\n");
 
@@ -1592,6 +1643,30 @@ function kindFromFileName(fileName) {
   if ([".xlsx", ".xlsm", ".xls"].includes(ext)) return "excel";
   if ([".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp"].includes(ext)) return "image";
   return "file";
+}
+
+// Human-readable location trail: folder segments > document > section headings,
+// e.g. "계약서 > 2024 > 벤더계약.md > 해지 조항". Shown on citations.
+function breadcrumbOf(chunk) {
+  const crumbs = [];
+  if (chunk.folder_path) crumbs.push(...String(chunk.folder_path).split("/"));
+  const doc = chunk.file_name || chunk.title;
+  if (doc) crumbs.push(doc);
+  if (chunk.heading_path) crumbs.push(...String(chunk.heading_path).split(" > "));
+  return crumbs.filter(Boolean).join(" > ");
+}
+
+// Directory portion of a source's relative path ("계약서/2024/파일.md" -> "계약서/2024").
+function folderPathOf(relativePath) {
+  const p = String(relativePath || "");
+  const cut = p.lastIndexOf("/");
+  return cut > 0 ? p.slice(0, cut) : "";
+}
+
+// Heading path stored on a chunk's locator JSON ("대제목 > 소제목"), or "".
+function headingPathOf(locatorJson) {
+  const loc = safeJson(locatorJson);
+  return typeof loc.heading === "string" ? loc.heading : "";
 }
 
 function safeJson(value) {

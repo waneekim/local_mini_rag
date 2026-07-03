@@ -1285,7 +1285,8 @@ function App() {
 
   function openCitationPopup(citation) {
     const locatorParts = [];
-    if (citation.locator?.relativePath) locatorParts.push(citation.locator.relativePath);
+    if (citation.breadcrumb) locatorParts.push(citation.breadcrumb);
+    else if (citation.locator?.relativePath) locatorParts.push(citation.locator.relativePath);
     if (citation.locator?.page) locatorParts.push(`페이지 ${citation.locator.page}`);
     if (citation.locator?.slide) locatorParts.push(`슬라이드 ${citation.locator.slide}`);
     if (citation.locator?.sheet) locatorParts.push(`시트 ${citation.locator.sheet}`);
@@ -2379,6 +2380,7 @@ function App() {
                       <span className="citation-num">[{c.number}]</span>
                       <span className="citation-title">{c.title}</span>
                       {c.locator?.page && <span className="citation-loc">p.{c.locator.page}</span>}
+                      {c.breadcrumb && <span className="citation-crumb">{c.breadcrumb}</span>}
                     </button>
                   </li>
                 ))}

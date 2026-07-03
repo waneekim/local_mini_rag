@@ -160,6 +160,11 @@ export async function createApp(options = {}) {
     return rag.listSources(request.params.profileId);
   });
 
+  // Indexed folder paths for drill-down scoping.
+  app.get("/api/profiles/:profileId/folders", async (request) => {
+    return rag.listFolders(request.params.profileId);
+  });
+
   app.post("/api/profiles/:profileId/sources/text", async (request, reply) => {
     const source = await rag.addTextSource(request.params.profileId, request.body || {});
     return reply.code(201).send(source);
