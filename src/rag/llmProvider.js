@@ -62,6 +62,8 @@ export class LlmProvider {
     this.baseUrl = options.baseUrl || process.env.LLM_BASE_URL || "";
     this.apiKey = options.apiKey || process.env.LLM_API_KEY || "";
     this.model = options.model || process.env.LLM_MODEL || "";
+    // Vision-capable model id, used when a chat message carries images.
+    this.visionModel = options.visionModel || process.env.VISION_MODEL || "";
     this.provider = options.provider || process.env.LLM_PROVIDER || (this.baseUrl ? "openai-compatible" : "mock");
     // Cap output length to bound worst-case latency. 0 = unlimited.
     this.maxTokens = Number(options.maxTokens ?? process.env.LLM_MAX_TOKENS ?? 1024);
@@ -103,12 +105,22 @@ export class LlmProvider {
     return payload.choices?.[0]?.message?.content?.trim() || "";
   }
 
-  async generate({ query, messages = [], envelope, system }) {
+  async generate({ query, messages = [], envelope, system, images = [] }) {
     if (this.provider === "mock") return this.mockGenerate({ query, envelope });
     if (this.provider !== "openai-compatible") throw new Error(`Unsupported LLM provider: ${this.provider}`);
     if (!this.baseUrl || !this.model) {
       throw new Error("LLM_BASE_URL and LLM_MODEL are required for openai-compatible provider");
     }
+
+    // When the message carries pasted images, send them as image_url parts so a
+    // vision model sees them alongside the prompt (no pre-OCR), and prefer the
+    // configured vision model id if one is set.
+    const hasImages = Array.isArray(images) && images.length > 0;
+    const userText = `Local RAG context:\n${envelope.contextText || "(no context)"}\n\nQuestion:\n${query || "(첨부한 이미지를 보고 답하세요)"}`;
+    const userContent = hasImages
+      ? [{ type: "text", text: userText }, ...images.map((url) => ({ type: "image_url", image_url: { url } }))]
+      : userText;
+    const model = hasImages && this.visionModel ? this.visionModel : this.model;
 
     const response = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
@@ -117,7 +129,7 @@ export class LlmProvider {
         ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {})
       },
       body: JSON.stringify({
-        model: this.model,
+        model,
         temperature: 0.2,
         ...(this.maxTokens > 0 ? { max_tokens: this.maxTokens } : {}),
         ...this.extraBody,
@@ -128,7 +140,7 @@ export class LlmProvider {
           },
           {
             role: "user",
-            content: `Local RAG context:\n${envelope.contextText || "(no context)"}\n\nQuestion:\n${query}`
+            content: userContent
           },
           ...messages
         ]

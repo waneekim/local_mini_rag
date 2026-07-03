@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import csv
 import importlib.util
 import json
@@ -25,7 +26,7 @@ def main():
         return
 
     request = json.loads(sys.stdin.read() or "{}")
-    result = extract(request)
+    result = render_pdf(request) if request.get("op") == "render" else extract(request)
     print(json.dumps(result, ensure_ascii=False))
 
 
@@ -93,6 +94,36 @@ def extract_text_file(file_path, request):
                 rows.append(" | ".join(cell.strip() for cell in row))
         return [unit("\n".join(rows), request, {"format": "csv"})]
     return [unit(read_text(path), request, {"format": path.suffix.lower().lstrip(".") or "text"})]
+
+
+def render_pdf(request):
+    # Per-page rendering for the preprocessing agent: pages that already have a
+    # text layer are returned as text; image-only (scanned) pages are rasterized
+    # to a PNG data URL so the caller can run vision-based structuring on them.
+    try:
+        file_path = request.get("filePath") or ""
+        if Path(file_path).suffix.lower() != ".pdf":
+            return {"status": "failed_with_action", "error": "render supports PDF files only", "pages": []}
+        require_module("fitz", "Install PyMuPDF with `npm run py:deps`.")
+        import fitz
+
+        max_pages = int(request.get("maxPages") or 30)
+        text_threshold = int(request.get("textThreshold") or 20)
+        pdf = fitz.open(file_path)
+        pages = []
+        for page_index in range(min(pdf.page_count, max_pages)):
+            page = pdf.load_page(page_index)
+            text = page.get_text("text").strip()
+            entry = {"page": page_index + 1, "text": text, "image": ""}
+            if len(text) < text_threshold:
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                entry["image"] = "data:image/png;base64," + base64.b64encode(pix.tobytes("png")).decode("ascii")
+            pages.append(entry)
+        return {"status": "ok", "pages": pages, "truncated": pdf.page_count > max_pages}
+    except MissingDependency as exc:
+        return {"status": "failed_with_action", "error": str(exc), "action": exc.action, "pages": []}
+    except Exception as exc:
+        return {"status": "failed_with_action", "error": str(exc), "pages": []}
 
 
 def extract_pdf(file_path, request):

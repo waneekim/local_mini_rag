@@ -809,6 +809,20 @@ input:focus, select:focus, textarea:focus {
   transition: border-color 0.12s, box-shadow 0.12s;
 }
 
+/* Pasted-image attachment chips shown above the composer input */
+.attach-row { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 10px 0; }
+.attach-chip { position: relative; width: 56px; height: 56px; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); }
+.attach-chip img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.attach-x {
+  position: absolute; top: 1px; right: 1px; width: 16px; height: 16px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 50%; background: rgba(0,0,0,0.6); color: #fff; cursor: pointer;
+}
+.attach-x:hover { background: rgba(0,0,0,0.85); }
+/* Attached images echoed inside the sent user bubble */
+.bubble-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.bubble-images img { max-width: 220px; max-height: 220px; border-radius: 8px; border: 1px solid var(--line); }
+
 /* keep the textarea corners from poking past the rounded composer */
 .composer textarea { border-top-left-radius: 13px; border-top-right-radius: 13px; }
 
@@ -953,6 +967,7 @@ input:focus, select:focus, textarea:focus {
   min-height: unset;
   display: flex;
   align-items: baseline;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 8px 14px;
   border-radius: 0;
@@ -989,6 +1004,15 @@ input:focus, select:focus, textarea:focus {
   flex-shrink: 0;
   color: var(--muted);
   font-size: 0.74rem;
+}
+
+/* Folder > document > section trail; wraps onto its own line under the title. */
+.citation-crumb {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 /* ── Settings modal ── */
@@ -1108,6 +1132,7 @@ input:focus, select:focus, textarea:focus {
 .rule-badge { font-size: 0.7rem; padding: 1px 7px; border-radius: 999px; background: rgba(255,255,255,0.1); }
 .rule-badge.approved { background: rgba(46, 160, 67, 0.22); }
 .rule-principle { font-weight: 600; }
+.structure-editor { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; line-height: 1.5; white-space: pre; }
 .rule-field { display: flex; flex-direction: column; gap: 2px; font-size: 0.74rem; opacity: 0.85; }
 .rule-pairs { display: flex; flex-direction: column; gap: 3px; font-size: 0.8rem; }
 .rule-pair .bad { color: #e5726f; text-decoration: line-through; }

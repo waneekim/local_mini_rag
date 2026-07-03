@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createApp } from "../src/app.js";
+import { chunkDocuments } from "../src/rag/chunking.js";
 import { EmbeddingService, localNgramEmbedding } from "../src/rag/embedding.js";
 import { LlmProvider, parseJsonObject } from "../src/rag/llmProvider.js";
 import { RerankService } from "../src/rag/rerank.js";
-import { htmlToText } from "../src/rag/ragService.js";
+import { buildTreeMarkdown, htmlToText } from "../src/rag/ragService.js";
 import { normalizeUploadedFileName, sanitizeFileName } from "../src/rag/sanitize.js";
 import { cosineSimilarity } from "../src/rag/vectorMath.js";
 
@@ -71,6 +72,56 @@ test("chat posts to {baseUrl}/chat/completions and merges extra_body at top leve
     assert.equal(body.messages[0].role, "system");
   } finally {
     globalThis.fetch = original;
+  }
+});
+
+test("generate sends pasted images as image_url parts and picks the vision model", async () => {
+  const calls = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, json: async () => ({ choices: [{ message: { content: "보입니다" } }] }) };
+  };
+  try {
+    const provider = new LlmProvider({ baseUrl: "http://llm.local/v1", model: "text-model", visionModel: "vl-model" });
+    const img = "data:image/png;base64,AAAA";
+    const result = await provider.generate({ query: "이거 뭐야?", envelope: { contextText: "", citations: [] }, images: [img] });
+    assert.equal(result.answer, "보입니다");
+    const body = JSON.parse(calls[0].options.body);
+    assert.equal(body.model, "vl-model"); // vision model used when images present
+    const content = body.messages[1].content;
+    assert.equal(Array.isArray(content), true);
+    assert.equal(content.some((p) => p.type === "image_url" && p.image_url.url === img), true);
+    assert.equal(content.some((p) => p.type === "text"), true);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("chat accepts an image-only message and forwards the images to the model", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-img-"));
+  let seen = null;
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      generate: async ({ query, images }) => {
+        seen = { query, images };
+        return { answer: "ok", provider: {}, raw: {} };
+      }
+    }
+  });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    const img = "data:image/png;base64,AAAA";
+    const res = await post(app, `/api/profiles/${p.id}/chat`, { images: [img] }); // no text query
+    assert.equal(res.answer, "ok");
+    assert.deepEqual(seen.images, [img]);
+    assert.equal(seen.query, "");
+  } finally {
+    await app.close();
   }
 });
 
@@ -271,6 +322,233 @@ test("profile text sources can be indexed, searched, and isolated", async () => 
     const chat = await post(app, `/api/profiles/${profileA.id}/chat`, { query: "환불은 언제 되나요?" });
     assert.equal(chat.answer, "answer with 1 citations");
     assert.equal(chat.citations.length, 1);
+  } finally {
+    await app.close();
+  }
+});
+
+test("markdown chunking splits on headings and keeps tables whole", () => {
+  const md = [
+    "# 보이스앤톤",
+    "",
+    "사용자는 '나'로 지칭한다.",
+    "",
+    "## 표현 대조표",
+    "",
+    "| 추천 | 피해야 할 말 |",
+    "| --- | --- |",
+    "| 내 폰 찾기 | 사용자 폰 찾기 |",
+    "| 내 모습 등록 | 사용자 모습 등록 |"
+  ].join("\n");
+
+  const chunks = chunkDocuments([{ text: md, metadata: { format: "markdown" }, locator: {} }]);
+  assert.equal(chunks.length >= 2, true);
+
+  // The intro sits under the top heading.
+  const intro = chunks.find((c) => c.text.includes("사용자는 '나'로 지칭한다."));
+  assert.equal(intro.locator.heading, "보이스앤톤");
+
+  // The table is never split mid-row: both data rows land in one chunk, tagged
+  // with the full heading path.
+  const table = chunks.find((c) => c.text.includes("| 추천"));
+  assert.match(table.text, /내 폰 찾기/);
+  assert.match(table.text, /내 모습 등록/);
+  assert.equal(table.locator.heading, "보이스앤톤 > 표현 대조표");
+});
+
+test("preprocess agent: structure a source, review-edit it, then index the Markdown", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-pre-"));
+  const generated =
+    "# 보이스앤톤\n\n사용자는 '나'로 지칭한다.\n\n| 추천 | 피해야 할 말 |\n| --- | --- |\n| 내 폰 찾기 | 사용자 폰 찾기 |";
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      complete: async () => generated, // structuring agent returns clean Markdown
+      generate: async ({ envelope }) => ({ answer: `ok ${envelope.citations.length}`, provider: {}, raw: {} })
+    }
+  });
+
+  try {
+    const p = await post(app, "/api/profiles", { name: "가이드" });
+    await post(app, `/api/profiles/${p.id}/sources/text`, {
+      title: "보이스앤톤",
+      text: "사용자는 나로 지칭. 추천 내 폰 찾기 / 피해야 할 말 사용자 폰 찾기"
+    });
+
+    // Preprocess (not indexed yet): the reviewed Markdown lands on the source.
+    const pjob = await post(app, `/api/profiles/${p.id}/preprocess`, {});
+    await waitForJob(app, pjob.id);
+    let sources = await get(app, `/api/profiles/${p.id}/sources`);
+    assert.equal(sources[0].normalized_md, generated);
+    assert.equal(sources[0].status, "review");
+    assert.equal(sources[0].preprocessed_at.length > 0, true);
+
+    // Human edit adds a row; the edit is what gets indexed.
+    const edited = `${generated}\n| 내 모습 등록 | 사용자 모습 등록 |`;
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/api/profiles/${p.id}/sources/${sources[0].id}/normalized`,
+      payload: { markdown: edited },
+      headers: { "content-type": "application/json" }
+    });
+    assert.equal(patched.statusCode, 200, patched.body);
+    assert.equal(patched.json().normalized_md, edited);
+
+    // Index uses the Markdown (not the raw pasted text) and chunks it structurally.
+    const ijob = await post(app, `/api/profiles/${p.id}/index`, {});
+    await waitForJob(app, ijob.id);
+    sources = await get(app, `/api/profiles/${p.id}/sources`);
+    assert.equal(sources[0].status, "indexed");
+    assert.equal(sources[0].chunkCount > 0, true);
+
+    const search = await post(app, `/api/profiles/${p.id}/search`, { query: "내 폰 찾기" });
+    assert.equal(search.hits.length > 0, true);
+    // The retrieved chunk carries its section heading from the Markdown structure.
+    assert.equal(search.hits.some((h) => (h.locator?.heading || "").includes("보이스앤톤")), true);
+    // The edited row survived into the indexed table chunk.
+    assert.equal(search.hits.some((h) => h.text.includes("내 모습 등록")), true);
+  } finally {
+    await app.close();
+  }
+});
+
+test("preprocess auto-approve structures and indexes in one pass (no review stop)", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-auto-"));
+  const generated = "# 환불 정책\n\n환불은 구매 후 7일 이내에 처리됩니다.";
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      complete: async () => generated,
+      generate: async ({ envelope }) => ({ answer: `ok ${envelope.citations.length}`, provider: {}, raw: {} })
+    }
+  });
+
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    await post(app, `/api/profiles/${p.id}/sources/text`, { title: "환불", text: "환불 7일 이내" });
+
+    // autoIndex=true: no separate index job, the source is indexed straight away.
+    const job = await post(app, `/api/profiles/${p.id}/preprocess`, { autoIndex: true });
+    await waitForJob(app, job.id);
+
+    const sources = await get(app, `/api/profiles/${p.id}/sources`);
+    assert.equal(sources[0].status, "indexed");
+    assert.equal(sources[0].normalized_md, generated);
+    assert.equal(sources[0].chunkCount > 0, true);
+
+    const search = await post(app, `/api/profiles/${p.id}/search`, { query: "환불은 언제 되나요?" });
+    assert.equal(search.hits.length > 0, true);
+  } finally {
+    await app.close();
+  }
+});
+
+test("source raw endpoint returns the original pasted text", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-raw-"));
+  const app = await createApp({ dataDir, logger: false, cleanupDataDir: true });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    const src = await post(app, `/api/profiles/${p.id}/sources/text`, { title: "메모", text: "원본 텍스트 내용" });
+    const res = await app.inject({ method: "GET", url: `/api/profiles/${p.id}/sources/${src.id}/raw` });
+    assert.equal(res.statusCode, 200);
+    assert.match(res.headers["content-type"], /text\/plain/);
+    assert.equal(res.body, "원본 텍스트 내용");
+
+    const missing = await app.inject({ method: "GET", url: `/api/profiles/${p.id}/sources/nope/raw` });
+    assert.equal(missing.statusCode, 404);
+  } finally {
+    await app.close();
+  }
+});
+
+test("buildTreeMarkdown renders a sorted, dir-first tree", () => {
+  const md = buildTreeMarkdown("root", ["root/contracts/2024/vendor.md", "root/readme.md", "root/contracts/nda.md"]);
+  assert.match(md, /# 폴더 구조: root/);
+  // directories sort before files at each level
+  assert.match(md, /- contracts\/[\s\S]*- readme\.md/);
+  assert.match(md, /- vendor\.md/);
+});
+
+test("folder tree: useTree adds a queryable structure source, off by default", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-tree-"));
+  const srcDir = await mkdtemp(join(tmpdir(), "tree-src-"));
+  await mkdir(join(srcDir, "contracts", "2024"), { recursive: true });
+  await writeFile(join(srcDir, "contracts", "2024", "vendor.md"), "벤더 계약은 2024년에 체결되었습니다.");
+  await writeFile(join(srcDir, "readme.md"), "이 폴더는 계약 문서를 담습니다.");
+
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: { describe: () => ({ provider: "test", model: "mock" }), generate: async () => ({ answer: "ok", provider: {}, raw: {} }) }
+  });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+
+    // Off: no folder-tree source.
+    const plain = await post(app, `/api/profiles/${p.id}/sources/path`, { path: srcDir });
+    assert.equal(plain.sources.some((s) => s.kind === "folder-tree"), false);
+
+    // On: a structure source is created and carries the tree.
+    const withTree = await post(app, `/api/profiles/${p.id}/sources/path`, { path: srcDir, useTree: true });
+    const tree = withTree.sources.find((s) => s.kind === "folder-tree");
+    assert.ok(tree, "expected a folder-tree source");
+    assert.match(tree.pasted_text, /contracts\//);
+    assert.match(tree.pasted_text, /vendor\.md/);
+
+    // It indexes and the structure becomes queryable.
+    const job = await post(app, `/api/profiles/${p.id}/index`, { sourceIds: [tree.id] });
+    await waitForJob(app, job.id);
+    const search = await post(app, `/api/profiles/${p.id}/search`, { query: "폴더 구조 contracts" });
+    assert.equal(search.hits.some((h) => h.sourceKind === "folder-tree"), true);
+  } finally {
+    await app.close();
+  }
+});
+
+test("folder scoping: drill-down restricts retrieval and breadcrumbs the hit", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-scope-"));
+  const srcDir = await mkdtemp(join(tmpdir(), "scope-src-"));
+  await mkdir(join(srcDir, "contracts", "2024"), { recursive: true });
+  await mkdir(join(srcDir, "contracts", "2023"), { recursive: true });
+  await writeFile(join(srcDir, "contracts", "2024", "vendor.md"), "2024년 벤더 계약 해지 조건은 30일 전 통보입니다.");
+  await writeFile(join(srcDir, "contracts", "2023", "vendor.md"), "2023년 벤더 계약 해지 조건은 60일 전 통보입니다.");
+
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: { describe: () => ({ provider: "test", model: "mock" }), generate: async () => ({ answer: "ok", provider: {}, raw: {} }) }
+  });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    await post(app, `/api/profiles/${p.id}/sources/path`, { path: srcDir });
+    const job = await post(app, `/api/profiles/${p.id}/index`, {});
+    await waitForJob(app, job.id);
+
+    // Folders are enumerable for the drill-down UI.
+    const folders = await get(app, `/api/profiles/${p.id}/folders`);
+    const rootName = srcDir.split("/").pop();
+    assert.equal(folders.some((f) => f.path === `${rootName}/contracts/2024`), true);
+
+    // Unscoped: both years are candidates.
+    const wide = await post(app, `/api/profiles/${p.id}/search`, { query: "벤더 계약 해지 조건" });
+    assert.equal(wide.hits.some((h) => h.folderPath.endsWith("2023")), true);
+    assert.equal(wide.hits.some((h) => h.folderPath.endsWith("2024")), true);
+
+    // Scoped via the folder: token: only the 2024 subtree survives, and the hit
+    // carries a breadcrumb through folder > document > (section).
+    const scoped = await post(app, `/api/profiles/${p.id}/search`, { query: `folder:${rootName}/contracts/2024 해지 조건` });
+    assert.equal(scoped.scope, `${rootName}/contracts/2024`);
+    assert.equal(scoped.hits.length > 0, true);
+    assert.equal(scoped.hits.every((h) => h.folderPath === `${rootName}/contracts/2024`), true);
+    assert.match(scoped.hits[0].breadcrumb, /contracts > 2024 > vendor\.md/);
   } finally {
     await app.close();
   }

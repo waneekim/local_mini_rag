@@ -11,7 +11,7 @@ export class WorkerClient {
   }
 
   async extract(source) {
-    const payload = JSON.stringify({
+    return this._run({
       sourceId: source.id,
       kind: source.kind,
       title: source.title,
@@ -22,6 +22,20 @@ export class WorkerClient {
       text: source.pasted_text,
       ocrLanguages: process.env.RAG_OCR_LANGUAGES || "kor+eng"
     });
+  }
+
+  // Rasterize a PDF page-by-page for the preprocessing agent. Pages with a text
+  // layer come back as text; scanned pages come back as PNG data URLs for vision.
+  async render(source, { maxPages } = {}) {
+    return this._run({
+      op: "render",
+      filePath: source.file_path,
+      maxPages: maxPages || Number(process.env.RAG_PREPROCESS_MAX_PAGES || 30)
+    });
+  }
+
+  _run(request) {
+    const payload = JSON.stringify(request);
 
     return new Promise((resolve, reject) => {
       const child = spawn(this.pythonCommand, [this.scriptPath], {

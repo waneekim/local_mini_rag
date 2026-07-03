@@ -2,7 +2,7 @@ import "./env/loadEnv.js";
 import Fastify from "fastify";
 import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
-import { existsSync } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -160,6 +160,11 @@ export async function createApp(options = {}) {
     return rag.listSources(request.params.profileId);
   });
 
+  // Indexed folder paths for drill-down scoping.
+  app.get("/api/profiles/:profileId/folders", async (request) => {
+    return rag.listFolders(request.params.profileId);
+  });
+
   app.post("/api/profiles/:profileId/sources/text", async (request, reply) => {
     const source = await rag.addTextSource(request.params.profileId, request.body || {});
     return reply.code(201).send(source);
@@ -171,7 +176,9 @@ export async function createApp(options = {}) {
   });
 
   app.post("/api/profiles/:profileId/sources/path", async (request, reply) => {
-    const sources = await rag.addPathSources(request.params.profileId, request.body?.path || "");
+    const sources = await rag.addPathSources(request.params.profileId, request.body?.path || "", {
+      useTree: request.body?.useTree === true || request.body?.useTree === "1"
+    });
     return reply.code(201).send({ sources });
   });
 
@@ -187,6 +194,28 @@ export async function createApp(options = {}) {
 
   app.delete("/api/profiles/:profileId/sources/:sourceId", async (request) => {
     return rag.deleteSource(request.params.profileId, request.params.sourceId);
+  });
+
+  // Open a source's original content (double-click in the tree): stream the
+  // uploaded file, redirect to the external URL, or return the pasted text.
+  app.get("/api/profiles/:profileId/sources/:sourceId/raw", async (request, reply) => {
+    const target = rag.getSourceFile(request.params.profileId, request.params.sourceId);
+    if (target.kind === "url") return reply.redirect(target.url);
+    if (target.kind === "text") {
+      return reply.type("text/plain; charset=utf-8").send(target.text);
+    }
+    reply.header("content-disposition", `inline; filename*=UTF-8''${encodeURIComponent(target.fileName)}`);
+    return reply.type(target.mimeType).send(createReadStream(target.filePath));
+  });
+
+  // Preprocessing agent: structure sources into reviewable Markdown before indexing.
+  app.post("/api/profiles/:profileId/preprocess", async (request, reply) => {
+    const job = await rag.startPreprocessJob(request.params.profileId, request.body || {});
+    return reply.code(202).send(job);
+  });
+
+  app.patch("/api/profiles/:profileId/sources/:sourceId/normalized", async (request) => {
+    return rag.updateNormalized(request.params.profileId, request.params.sourceId, request.body?.markdown ?? "");
   });
 
   app.post("/api/profiles/:profileId/index", async (request, reply) => {

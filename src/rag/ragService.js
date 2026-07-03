@@ -8,6 +8,7 @@ import { hashFile, hashText } from "./hash.js";
 import { id, nowIso } from "./ids.js";
 import { CHAT_MODES, LlmProvider } from "./llmProvider.js";
 import { extractTextFromImage } from "./vision.js";
+import { imageToDataUrl, structureFromImage, structureFromText } from "./preprocess.js";
 import { basenameFromRelative, normalizeUploadedFileName, sanitizeFileName } from "./sanitize.js";
 import { chunkDocuments } from "./chunking.js";
 import { cosineSimilarity, lexicalScore } from "./vectorMath.js";
@@ -47,6 +48,7 @@ class RagService {
       provider: llm.provider || undefined,
       baseUrl: llm.baseUrl || undefined,
       model: llm.model || undefined,
+      visionModel: llm.visionModel || undefined,
       apiKey: llm.apiKey || undefined
     });
     const emb = settings.embedding || {};
@@ -238,9 +240,11 @@ class RagService {
 
     // Map remote source ids -> new local ids and copy source rows (no files).
     const sourceIdMap = new Map();
+    const sourceRelMap = new Map();
     for (const s of payload.sources || []) {
       const newSourceId = id("source");
       sourceIdMap.set(s.refId, newSourceId);
+      sourceRelMap.set(s.refId, s.relative_path || "");
       insertSource(this.db, {
         id: newSourceId,
         profile_id: newProfileId,
@@ -276,8 +280,8 @@ class RagService {
     chunks.forEach((c, index) => {
       run(
         this.db,
-        `INSERT INTO chunks (id, profile_id, source_id, chunk_index, text, locator_json, embedding_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO chunks (id, profile_id, source_id, chunk_index, text, locator_json, embedding_json, folder_path, heading_path, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         id("chunk"),
         newProfileId,
         sourceIdMap.get(c.sourceRefId),
@@ -285,6 +289,8 @@ class RagService {
         c.text,
         c.locator_json || "{}",
         compatible ? c.embedding_json : JSON.stringify(vectors[index]),
+        folderPathOf(sourceRelMap.get(c.sourceRefId)),
+        headingPathOf(c.locator_json),
         at
       );
     });
@@ -492,6 +498,20 @@ class RagService {
     return { block: buildFeedbackBlock(scored.map((s) => s.row)), used: scored.length };
   }
 
+  // Distinct indexed folder paths (with chunk counts) for drill-down/scoping UI.
+  listFolders(profileId) {
+    this.ensureProfile(profileId);
+    return all(
+      this.db,
+      `SELECT folder_path AS path, COUNT(*) AS chunkCount
+       FROM chunks
+       WHERE profile_id = ? AND folder_path <> ''
+       GROUP BY folder_path
+       ORDER BY folder_path ASC`,
+      profileId
+    );
+  }
+
   listSources(profileId) {
     this.ensureProfile(profileId);
     return all(this.db, "SELECT * FROM sources WHERE profile_id = ? ORDER BY created_at DESC", profileId).map((source) => ({
@@ -531,8 +551,14 @@ class RagService {
   async addFileSources(profileId, parts) {
     this.ensureProfile(profileId);
     const created = [];
+    let useTree = false;
 
     for await (const part of parts) {
+      // A `useTree` form field toggles capturing the folder tree as a source.
+      if (part.type === "field") {
+        if (part.fieldname === "useTree") useTree = part.value === "true" || part.value === "1";
+        continue;
+      }
       if (part.type !== "file") continue;
       const sourceId = id("source");
       const relativePath = sanitizeFileName(normalizeUploadedFileName(part.filename));
@@ -565,6 +591,10 @@ class RagService {
     }
 
     if (!created.length) throw Object.assign(new Error("No files uploaded"), { statusCode: 400 });
+    if (useTree) {
+      const tree = this._addTreeSource(profileId, created);
+      if (tree) created.push(tree);
+    }
     touchProfile(this.db, profileId);
     return created;
   }
@@ -616,7 +646,7 @@ class RagService {
     return source;
   }
 
-  async addPathSources(profileId, inputPath) {
+  async addPathSources(profileId, inputPath, { useTree = false } = {}) {
     this.ensureProfile(profileId);
     const target = String(inputPath || "").trim();
     if (!target) throw Object.assign(new Error("Path is required"), { statusCode: 400 });
@@ -657,8 +687,43 @@ class RagService {
       insertSource(this.db, source);
       created.push(source);
     }
+    if (useTree) {
+      const tree = this._addTreeSource(profileId, created);
+      if (tree) created.push(tree);
+    }
     touchProfile(this.db, profileId);
     return created;
+  }
+
+  // Serialize a folder's tree into a Markdown source so the structure itself is
+  // indexed and queryable ("어느 폴더에?", "구성 요약"). Skips flat (no-nesting)
+  // uploads where a tree adds nothing.
+  _addTreeSource(profileId, sources) {
+    const paths = sources.map((s) => s.relative_path).filter((p) => p && p.includes("/"));
+    if (paths.length < 1) return null;
+    const root = paths[0].split("/")[0] || "folder";
+    const markdown = buildTreeMarkdown(root, paths);
+    const at = nowIso();
+    const source = {
+      id: id("source"),
+      profile_id: profileId,
+      kind: "folder-tree",
+      title: `📁 ${root} 구조`,
+      file_name: "",
+      relative_path: "",
+      mime_type: "text/markdown",
+      file_path: "",
+      pasted_text: markdown,
+      status: "pending",
+      error: "",
+      metadata_json: JSON.stringify({ input: "folder-tree", root, fileCount: paths.length }),
+      content_hash: hashText(markdown),
+      created_at: at,
+      updated_at: at,
+      indexed_at: ""
+    };
+    insertSource(this.db, source);
+    return source;
   }
 
   async copySource(targetProfileId, input) {
@@ -690,8 +755,8 @@ class RagService {
     for (const chunk of chunks) {
       run(
         this.db,
-        `INSERT INTO chunks (id, profile_id, source_id, chunk_index, text, locator_json, embedding_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO chunks (id, profile_id, source_id, chunk_index, text, locator_json, embedding_json, folder_path, heading_path, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         id("chunk"),
         targetProfileId,
         newId,
@@ -699,6 +764,8 @@ class RagService {
         chunk.text,
         chunk.locator_json,
         chunk.embedding_json,
+        chunk.folder_path || folderPathOf(copy.relative_path),
+        chunk.heading_path || headingPathOf(chunk.locator_json),
         chunk.created_at
       );
     }
@@ -717,6 +784,190 @@ class RagService {
     }
     touchProfile(this.db, profileId);
     return { ok: true };
+  }
+
+  // --- Preprocessing agent (structure a source into reviewable Markdown) ----
+  // Turns a messy/OCR'd source or a document screenshot into clean Markdown
+  // BEFORE indexing. Runs as a background job like indexing; the result lands in
+  // `sources.normalized_md` with status `review` for the user to check/edit.
+
+  async startPreprocessJob(profileId, input = {}) {
+    this.ensureProfile(profileId);
+    const at = nowIso();
+    const job = {
+      id: id("job"),
+      profile_id: profileId,
+      type: "preprocess",
+      status: "queued",
+      message: "Queued",
+      total_sources: 0,
+      processed_sources: 0,
+      failed_sources: 0,
+      created_at: at,
+      updated_at: at
+    };
+    run(
+      this.db,
+      `INSERT INTO jobs
+       (id, profile_id, type, status, message, total_sources, processed_sources, failed_sources, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      job.id, job.profile_id, job.type, job.status, job.message,
+      job.total_sources, job.processed_sources, job.failed_sources, job.created_at, job.updated_at
+    );
+
+    queueMicrotask(() => {
+      this.runPreprocessJob(job.id, profileId, input).catch((error) => {
+        this.logger?.error?.(error);
+        updateJob(this.db, job.id, { status: "failed", message: error.message });
+      });
+    });
+    return job;
+  }
+
+  async runPreprocessJob(jobId, profileId, input) {
+    const onlySourceIds = Array.isArray(input.sourceIds) ? new Set(input.sourceIds) : null;
+    const force = Boolean(input.force);
+    // Auto-approve: index each source straight after structuring instead of
+    // stopping at the `review` state (fully automatic mode).
+    const autoIndex = Boolean(input.autoIndex);
+    const candidates = all(this.db, "SELECT * FROM sources WHERE profile_id = ? ORDER BY created_at ASC", profileId).filter(
+      (source) => !onlySourceIds || onlySourceIds.has(source.id)
+    );
+
+    updateJob(this.db, jobId, {
+      status: "running",
+      message: "Structuring",
+      total_sources: candidates.length,
+      processed_sources: 0,
+      failed_sources: 0
+    });
+
+    let processed = 0;
+    let failed = 0;
+    for (const source of candidates) {
+      try {
+        const structured = await this.preprocessSource(source, { force });
+        if (autoIndex && structured) await this.indexSource(structured);
+        processed += 1;
+      } catch (error) {
+        failed += 1;
+        processed += 1;
+        run(
+          this.db,
+          "UPDATE sources SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+          "failed_with_action", error.message, nowIso(), source.id
+        );
+      }
+      updateJob(this.db, jobId, {
+        status: "running",
+        message: `${autoIndex ? "Structured & indexed" : "Structured"} ${processed}/${candidates.length}`,
+        processed_sources: processed,
+        failed_sources: failed
+      });
+    }
+
+    updateJob(this.db, jobId, {
+      status: failed ? "completed_with_errors" : "completed",
+      message: failed ? `${failed} source(s) need action` : "Completed",
+      processed_sources: processed,
+      failed_sources: failed
+    });
+    touchProfile(this.db, profileId);
+  }
+
+  async preprocessSource(source, { force = false } = {}) {
+    // Skip untouched sources already structured for their current content.
+    if (!force && String(source.normalized_md || "").trim() && source.preprocess_hash && source.preprocess_hash === source.content_hash) {
+      return one(this.db, "SELECT * FROM sources WHERE id = ?", source.id);
+    }
+
+    run(this.db, "UPDATE sources SET status = ?, error = ?, updated_at = ? WHERE id = ?", "structuring", "", nowIso(), source.id);
+
+    // Hybrid routing by source kind: images go to vision, PDFs go page-by-page
+    // (vision for scanned pages, text for pages with a text layer), and
+    // everything else has its extracted text restructured by the text LLM.
+    const visionLlm = this.settingsStore?.get()?.llm || {};
+    let markdown = "";
+    if (source.kind === "image") {
+      if (!source.file_path) throw new Error("이미지 파일 경로가 없습니다.");
+      const dataUrl = await imageToDataUrl(source.file_path);
+      markdown = await structureFromImage(dataUrl, { llm: visionLlm });
+    } else if (source.kind === "pdf" && source.file_path) {
+      markdown = await this._preprocessPdf(source, visionLlm);
+    } else {
+      // Text path: extract raw text (pasted or via the worker) then restructure.
+      let text = String(source.pasted_text || "");
+      if (!text.trim()) {
+        const extracted = await this.worker.extract(source);
+        if (extracted.status !== "ok") throw new Error(extracted.error || "Document extraction failed");
+        text = (extracted.documents || []).map((doc) => doc.text).join("\n\n");
+      }
+      markdown = await structureFromText(text, { llm: this.llm });
+    }
+
+    if (!markdown.trim()) throw new Error("전처리 결과가 비어 있습니다.");
+    const at = nowIso();
+    run(
+      this.db,
+      "UPDATE sources SET normalized_md = ?, preprocessed_at = ?, preprocess_hash = ?, status = ?, error = ?, updated_at = ? WHERE id = ?",
+      markdown, at, source.content_hash || "", "review", "", at, source.id
+    );
+    return one(this.db, "SELECT * FROM sources WHERE id = ?", source.id);
+  }
+
+  // Structure a PDF page-by-page: scanned pages are reconstructed from their
+  // rendered image via vision; pages with a text layer are restructured as text.
+  // Each page is prefixed with a heading so section context survives chunking.
+  async _preprocessPdf(source, visionLlm) {
+    const rendered = await this.worker.render(source);
+    if (rendered.status !== "ok") throw new Error(rendered.error || "PDF 렌더링에 실패했습니다.");
+    const parts = [];
+    for (const page of rendered.pages || []) {
+      let md = "";
+      if (page.image) {
+        md = await structureFromImage(page.image, { llm: visionLlm });
+      } else if (String(page.text || "").trim()) {
+        md = await structureFromText(page.text, { llm: this.llm });
+      }
+      if (md.trim()) parts.push(`<!-- page ${page.page} -->\n${md.trim()}`);
+    }
+    return parts.join("\n\n");
+  }
+
+  // Resolve a source to something openable: an on-disk file, an external URL, or
+  // inline pasted text. Used by the "open original" (double-click) action.
+  getSourceFile(profileId, sourceId) {
+    this.ensureProfile(profileId);
+    const source = one(this.db, "SELECT * FROM sources WHERE id = ? AND profile_id = ?", sourceId, profileId);
+    if (!source) throw Object.assign(new Error("Source not found"), { statusCode: 404 });
+    const url = safeJson(source.metadata_json)?.url;
+    if (source.kind === "url" && url) return { kind: "url", url };
+    if (source.file_path && existsSync(source.file_path)) {
+      return {
+        kind: "file",
+        filePath: source.file_path,
+        fileName: source.file_name || basename(source.file_path),
+        mimeType: source.mime_type || mimeFromFileName(source.file_name || source.file_path)
+      };
+    }
+    if (source.pasted_text) return { kind: "text", text: source.pasted_text, fileName: `${source.title || "source"}.txt` };
+    throw Object.assign(new Error("열 수 있는 원본이 없습니다."), { statusCode: 404 });
+  }
+
+  // Save a human-reviewed edit of a source's structured Markdown. Clearing it
+  // (empty string) reverts the source to raw-extraction indexing.
+  updateNormalized(profileId, sourceId, markdown) {
+    this.ensureProfile(profileId);
+    const source = one(this.db, "SELECT * FROM sources WHERE id = ? AND profile_id = ?", sourceId, profileId);
+    if (!source) throw Object.assign(new Error("Source not found"), { statusCode: 404 });
+    const md = String(markdown ?? "");
+    const at = nowIso();
+    run(
+      this.db,
+      "UPDATE sources SET normalized_md = ?, preprocessed_at = ?, preprocess_hash = ?, status = ?, updated_at = ? WHERE id = ?",
+      md, md.trim() ? at : "", md.trim() ? source.content_hash || "" : "", md.trim() ? "review" : "pending", at, sourceId
+    );
+    return one(this.db, "SELECT * FROM sources WHERE id = ?", sourceId);
   }
 
   async startIndexJob(profileId, input = {}) {
@@ -825,12 +1076,29 @@ class RagService {
     run(this.db, "DELETE FROM chunks WHERE source_id = ?", source.id);
     run(this.db, "UPDATE sources SET status = ?, error = ?, updated_at = ? WHERE id = ?", "extracting", "", nowIso(), source.id);
 
-    const extracted = await this.worker.extract(source);
-    if (extracted.status !== "ok") {
-      throw new Error(extracted.error || "Document extraction failed");
+    // Prefer the preprocessing agent's reviewed Markdown when present: skip the
+    // raw extractor and chunk the clean, structure-preserving text instead.
+    const normalized = String(source.normalized_md || "").trim();
+    let documents;
+    let warnings = [];
+    if (normalized) {
+      documents = [
+        {
+          text: normalized,
+          locator: { relativePath: source.relative_path || "", format: "markdown" },
+          metadata: { title: source.title || source.file_name || "source", sourceId: source.id, format: "markdown" }
+        }
+      ];
+    } else {
+      const extracted = await this.worker.extract(source);
+      if (extracted.status !== "ok") {
+        throw new Error(extracted.error || "Document extraction failed");
+      }
+      documents = extracted.documents || [];
+      warnings = extracted.warnings || [];
     }
 
-    const chunks = chunkDocuments(extracted.documents || []);
+    const chunks = chunkDocuments(documents);
     if (!chunks.length) throw new Error("No indexable text extracted");
 
     run(this.db, "UPDATE sources SET status = ?, updated_at = ? WHERE id = ?", "embedding", nowIso(), source.id);
@@ -846,11 +1114,12 @@ class RagService {
     );
 
     const at = nowIso();
+    const folderPath = folderPathOf(source.relative_path);
     chunks.forEach((chunk, index) => {
       run(
         this.db,
-        `INSERT INTO chunks (id, profile_id, source_id, chunk_index, text, locator_json, embedding_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO chunks (id, profile_id, source_id, chunk_index, text, locator_json, embedding_json, folder_path, heading_path, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         id("chunk"),
         source.profile_id,
         source.id,
@@ -858,6 +1127,8 @@ class RagService {
         chunk.text,
         JSON.stringify({ ...chunk.locator, metadata: chunk.metadata }),
         JSON.stringify(vectors[index]),
+        folderPath,
+        typeof chunk.locator?.heading === "string" ? chunk.locator.heading : "",
         at
       );
     });
@@ -871,8 +1142,9 @@ class RagService {
       at,
       JSON.stringify({
         ...safeJson(source.metadata_json),
-        warnings: extracted.warnings || [],
-        extractedUnits: extracted.documents?.length || 0,
+        warnings,
+        preprocessed: Boolean(normalized),
+        extractedUnits: documents.length,
         chunks: chunks.length
       }),
       source.id
@@ -881,7 +1153,16 @@ class RagService {
 
   async search(profileId, input) {
     this.ensureProfile(profileId);
-    const query = String(input.query || "").trim();
+    let query = String(input.query || "").trim();
+    if (!query) throw Object.assign(new Error("Query is required"), { statusCode: 400 });
+    // Drill-down: an explicit `scope`, or a leading `folder:<path>` token in the
+    // query, restricts retrieval to one folder subtree ("의미있게 찾아 들어가기").
+    let scope = String(input.scope || "").trim().replace(/\/+$/, "");
+    const scopeToken = /^\s*folder:("[^"]+"|\S+)\s+/i.exec(query);
+    if (scopeToken) {
+      scope = scopeToken[1].replace(/^"|"$/g, "").replace(/\/+$/, "");
+      query = query.slice(scopeToken[0].length).trim();
+    }
     if (!query) throw Object.assign(new Error("Query is required"), { statusCode: 400 });
     const topK = clamp(Number(input.topK || DEFAULT_TOP_K), 1, 30);
     // Relevance floor: below this combined score a hit is treated as noise and
@@ -900,23 +1181,36 @@ class RagService {
       profileId
     );
 
+    const inScope = (folder) => !scope || folder === scope || String(folder).startsWith(`${scope}/`);
+
     const scored = chunks
+      .filter((chunk) => inScope(chunk.folder_path || ""))
       .map((chunk) => {
         const vector = JSON.parse(chunk.embedding_json);
         const vectorScore = cosineSimilarity(queryVector, vector);
         const keywordScore = lexicalScore(query, chunk.text);
+        // Path boost: reward chunks whose folder/heading names echo the query,
+        // so a well-categorised tree nudges the right section up. Empty paths
+        // (plain text sources) contribute nothing, keeping legacy behaviour.
+        const pathText = `${(chunk.folder_path || "").replace(/\//g, " ")} ${(chunk.heading_path || "").replace(/>/g, " ")}`.trim();
+        const pathScore = pathText ? lexicalScore(query, pathText) : 0;
+        const combined = vectorScore * 0.8 + keywordScore * 0.2 + pathScore * 0.15;
         return {
           id: chunk.id,
           sourceId: chunk.source_id,
           title: chunk.title,
           fileName: chunk.file_name,
           relativePath: chunk.relative_path,
+          folderPath: chunk.folder_path || "",
+          headingPath: chunk.heading_path || "",
+          breadcrumb: breadcrumbOf(chunk),
           sourceKind: chunk.kind,
           text: chunk.text,
           locator: safeJson(chunk.locator_json),
-          score: Number((vectorScore * 0.8 + keywordScore * 0.2).toFixed(6)),
+          score: Number(combined.toFixed(6)),
           vectorScore: Number(vectorScore.toFixed(6)),
-          keywordScore: Number(keywordScore.toFixed(6))
+          keywordScore: Number(keywordScore.toFixed(6)),
+          pathScore: Number(pathScore.toFixed(6))
         };
       })
       .filter((hit) => hit.score > 0 && hit.score >= minScore)
@@ -938,6 +1232,7 @@ class RagService {
     return {
       profileId,
       query,
+      scope: scope || "",
       topK,
       reranked: rr.reranked,
       timings,
@@ -983,16 +1278,21 @@ class RagService {
       chunkId: hit.id,
       sourceId: hit.sourceId,
       title: hit.title,
+      breadcrumb: hit.breadcrumb || "",
+      folderPath: hit.folderPath || "",
+      headingPath: hit.headingPath || "",
       locator: hit.locator,
       score: hit.score,
       excerpt: excerpt(hit.text),
       text: hit.text
     }));
 
+    // Prefer the full breadcrumb (folder > document > section) as the citation
+    // header so the LLM knows exactly where each passage sits in the hierarchy.
     const contextText = search.hits
       .map((hit, index) => {
-        const locator = formatLocator(hit.locator);
-        return `[${index + 1}] ${hit.title}${locator ? ` (${locator})` : ""}\n${hit.text}`;
+        const label = hit.breadcrumb || `${hit.title}${formatLocator(hit.locator) ? ` (${formatLocator(hit.locator)})` : ""}`;
+        return `[${index + 1}] ${label}\n${hit.text}`;
       })
       .join("\n\n");
 
@@ -1009,8 +1309,16 @@ class RagService {
 
   async chat(profileId, input) {
     const query = String(input.query || "").trim();
-    if (!query) throw Object.assign(new Error("Query is required"), { statusCode: 400 });
-    const envelope = await this.buildContext(profileId, input);
+    // Pasted images ride along as data URLs and are shown to the vision model
+    // together with the prompt (not pre-OCR'd). A message may be image-only.
+    const images = Array.isArray(input.images)
+      ? input.images.filter((s) => typeof s === "string" && s.startsWith("data:"))
+      : [];
+    if (!query && !images.length) throw Object.assign(new Error("Query is required"), { statusCode: 400 });
+    // Retrieval is driven by the text query; an image-only message skips it.
+    const envelope = query
+      ? await this.buildContext(profileId, input)
+      : { profileId, query: "", contextText: "", hits: [], citations: [], timings: {}, sourceVersion: sourceVersion(this.db, profileId) };
     const mode =
       this.modeStore?.get(input.mode) ||
       this.modeStore?.get("general") ||
@@ -1020,7 +1328,7 @@ class RagService {
     // Deterministic rule lint for guideline modes: prepend concrete violations
     // + rule principles to the context so the LLM grounds its ✅/⚠️ + rewrite.
     let violations = [];
-    if (RULE_MODES.has(mode?.key)) {
+    if (query && RULE_MODES.has(mode?.key)) {
       const rules = this.listRules(profileId, { status: "approved" });
       if (rules.length) {
         violations = lintText(query, rules);
@@ -1030,7 +1338,7 @@ class RagService {
     }
 
     // Self-improving memory: prepend guidance recalled from similar past feedback.
-    const memory = await this.recallFeedback(profileId, query);
+    const memory = query ? await this.recallFeedback(profileId, query) : { block: "", used: 0 };
     if (memory.block) envelope.contextText = `${memory.block}\n\n${envelope.contextText}`;
 
     const tGen = performance.now();
@@ -1038,7 +1346,8 @@ class RagService {
       query,
       messages: input.messages || [],
       envelope,
-      system: mode?.system
+      system: mode?.system,
+      images
     });
     const answerMs = Math.round(performance.now() - tGen);
     const timings = { ...(envelope.timings || {}), answerMs };
@@ -1211,6 +1520,36 @@ function walkDir(dir, relPrefix, out) {
   }
 }
 
+// Build an indented Markdown tree from a set of "root/dir/file" paths. Folders
+// get a trailing slash; entries are sorted with directories before files.
+export function buildTreeMarkdown(root, paths) {
+  const tree = {};
+  for (const path of paths) {
+    let node = tree;
+    for (const part of String(path).split("/")) {
+      if (!part) continue;
+      node[part] = node[part] || {};
+      node = node[part];
+    }
+  }
+  const lines = [`# 폴더 구조: ${root}`, ""];
+  const walk = (node, depth) => {
+    const names = Object.keys(node).sort((a, b) => {
+      const aDir = Object.keys(node[a]).length > 0;
+      const bDir = Object.keys(node[b]).length > 0;
+      if (aDir !== bDir) return aDir ? -1 : 1; // directories first
+      return a.localeCompare(b);
+    });
+    for (const name of names) {
+      const isDir = Object.keys(node[name]).length > 0;
+      lines.push(`${"  ".repeat(depth)}- ${name}${isDir ? "/" : ""}`);
+      walk(node[name], depth + 1);
+    }
+  };
+  walk(tree, 0);
+  return lines.join("\n");
+}
+
 export function htmlToText(html) {
   let s = String(html || "").replace(/<(script|style|noscript|template|svg)[\s\S]*?<\/\1>/gi, " ");
   const titleMatch = s.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
@@ -1280,6 +1619,31 @@ function isInside(parent, child) {
   return child === parent || child.startsWith(p);
 }
 
+const MIME_BY_EXT = {
+  ".pdf": "application/pdf",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".bmp": "image/bmp",
+  ".tif": "image/tiff",
+  ".tiff": "image/tiff",
+  ".svg": "image/svg+xml",
+  ".txt": "text/plain",
+  ".md": "text/markdown",
+  ".csv": "text/csv",
+  ".json": "application/json",
+  ".html": "text/html",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+};
+
+function mimeFromFileName(fileName) {
+  return MIME_BY_EXT[extname(String(fileName || "")).toLowerCase()] || "application/octet-stream";
+}
+
 function kindFromFileName(fileName) {
   const ext = extname(fileName).toLowerCase();
   if ([".txt", ".md", ".csv", ".json", ".html"].includes(ext)) return "text-file";
@@ -1289,6 +1653,30 @@ function kindFromFileName(fileName) {
   if ([".xlsx", ".xlsm", ".xls"].includes(ext)) return "excel";
   if ([".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp"].includes(ext)) return "image";
   return "file";
+}
+
+// Human-readable location trail: folder segments > document > section headings,
+// e.g. "계약서 > 2024 > 벤더계약.md > 해지 조항". Shown on citations.
+function breadcrumbOf(chunk) {
+  const crumbs = [];
+  if (chunk.folder_path) crumbs.push(...String(chunk.folder_path).split("/"));
+  const doc = chunk.file_name || chunk.title;
+  if (doc) crumbs.push(doc);
+  if (chunk.heading_path) crumbs.push(...String(chunk.heading_path).split(" > "));
+  return crumbs.filter(Boolean).join(" > ");
+}
+
+// Directory portion of a source's relative path ("계약서/2024/파일.md" -> "계약서/2024").
+function folderPathOf(relativePath) {
+  const p = String(relativePath || "");
+  const cut = p.lastIndexOf("/");
+  return cut > 0 ? p.slice(0, cut) : "";
+}
+
+// Heading path stored on a chunk's locator JSON ("대제목 > 소제목"), or "".
+function headingPathOf(locatorJson) {
+  const loc = safeJson(locatorJson);
+  return typeof loc.heading === "string" ? loc.heading : "";
 }
 
 function safeJson(value) {

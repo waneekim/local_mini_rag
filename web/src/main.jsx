@@ -11,6 +11,7 @@ import {
   File,
   FileText,
   Folder,
+  FolderTree,
   FolderUp,
   Globe,
   Link,
@@ -72,8 +73,13 @@ function App() {
   const [agentFilter, setAgentFilter] = useState("");
   const [suggest, setSuggest] = useState(null); // { type:"mention"|"command", items, index }
   const [autoIndex, setAutoIndex] = useState(() => localStorage.getItem("rag.autoIndex") === "1");
+  // Preprocess auto-approve: structure straight into indexing, skipping review.
+  const [autoApprove, setAutoApprove] = useState(() => localStorage.getItem("rag.autoApprove") === "1");
+  // Folder tree: when adding a folder, also index its structure as a source.
+  const [folderTree, setFolderTree] = useState(() => localStorage.getItem("rag.folderTree") === "1");
   const [editingMode, setEditingMode] = useState(null); // mode being edited/created in settings
   const [crop, setCrop] = useState(null); // { src, w, h } captured screenshot to crop
+  const [attachments, setAttachments] = useState([]); // pasted/captured image data URLs sent with the next prompt
   const [dragRect, setDragRect] = useState(null); // selection rect in client coords
   const [manualCompact, setManualCompact] = useState(() => {
     const p = new URLSearchParams(window.location.search).get("compact");
@@ -123,6 +129,8 @@ function App() {
   // Guideline rules (structured compliance) per agent.
   const [rulesModal, setRulesModal] = useState(null); // { profileId }
   const [rules, setRules] = useState([]);
+  // Preprocessing agent: review/edit a source's structured Markdown before indexing.
+  const [structureModal, setStructureModal] = useState(null); // { pid, source, md, busy }
   const [ruleBusy, setRuleBusy] = useState(false);
   const [lintInput, setLintInput] = useState("");
   const [lintResult, setLintResult] = useState(null);
@@ -172,6 +180,8 @@ function App() {
       { cmd: "no-embed-list", desc: "임베딩 안 된 소스" },
       { cmd: "types", desc: "임베딩 가능한 파일 형식" },
       { cmd: "autoindex", desc: "추가 시 자동 임베딩 켜기/끄기" },
+      { cmd: "autoapprove", desc: "전처리 자동 승인(검토 없이 색인) 켜기/끄기" },
+      { cmd: "foldertree", desc: "폴더 추가 시 폴더 구조를 소스로 색인 켜기/끄기" },
       { cmd: "skills", desc: "설치된 스킬 목록" },
       { cmd: "help", desc: "도움말" }
     ];
@@ -223,7 +233,7 @@ function App() {
       const file = item.getAsFile();
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = () => extractFromImage(reader.result);
+      reader.onload = () => attachImage(reader.result);
       reader.readAsDataURL(file);
     }
     window.addEventListener("click", onClick);
@@ -564,6 +574,7 @@ function App() {
     try {
       const form = new FormData();
       for (const { file, name } of entries) form.append("files", file, name);
+      form.append("useTree", folderTree ? "1" : "0");
       const res = await fetchJson(`/api/profiles/${pid}/sources/files`, { method: "POST", body: form });
       await loadSources(pid);
       setStatus(`${res.sources.length}개 파일 추가됨`);
@@ -584,7 +595,7 @@ function App() {
       const res = await fetchJson(`/api/profiles/${pid}/sources/path`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ path })
+        body: JSON.stringify({ path, useTree: folderTree })
       });
       await loadSources(pid);
       setStatus(`${res.sources.length}개 소스 추가됨`);
@@ -624,31 +635,23 @@ function App() {
     }
   }
 
-  // ── Screenshot → Vision LLM → prompt ──
+  // ── Pasted / captured image → attach to the next prompt ──
+  // The image rides along with the message and is shown to the vision model
+  // together with the text (no pre-OCR). Displayed as a chip above the composer.
 
-  async function extractFromImage(dataUrl) {
-    setBusy(true);
-    setStatus("이미지에서 텍스트 추출 중… (수 초~수십 초)");
+  async function attachImage(dataUrl) {
     try {
       const image = await downscaleImage(dataUrl);
-      const { text } = await fetchJson("/api/vision/extract", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ image })
-      });
-      if (text) {
-        setQuery((q) => (q ? `${q}\n${text}` : text));
-        setStatus("텍스트 추출됨 · 검토 후 전송");
-        setTimeout(() => inputRef.current?.focus(), 0);
-      } else {
-        setStatus("추출된 텍스트가 없습니다");
-      }
+      setAttachments((prev) => [...prev, image]);
+      setStatus("이미지 첨부됨 · 프롬프트와 함께 전송됩니다");
+      setTimeout(() => inputRef.current?.focus(), 0);
     } catch (e) {
-      window.alert(`텍스트 추출 오류: ${e.message}`);
-      setStatus("추출 오류");
-    } finally {
-      setBusy(false);
+      setStatus(`이미지 첨부 오류: ${e.message}`);
     }
+  }
+
+  function removeAttachment(index) {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
   }
 
   async function captureScreenshot() {
@@ -710,7 +713,7 @@ function App() {
     c.width = Math.round(sw);
     c.height = Math.round(sh);
     c.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
-    await extractFromImage(c.toDataURL("image/png"));
+    await attachImage(c.toDataURL("image/png"));
   }
 
 
@@ -741,6 +744,64 @@ function App() {
     });
     setJob(payload);
     setStatus(`임베딩 중 (${sourceIds.length}개)`);
+  }
+
+  // Run the structuring (preprocessing) agent over sources: extract meaning and
+  // rebuild them as clean Markdown for review before indexing. Reuses the shared
+  // job poller, which reloads sources when the job finishes.
+  async function structureSources(sourceIds, pid, { autoIndex: forceAuto } = {}) {
+    if (!sourceIds.length) return;
+    const auto = forceAuto ?? autoApprove;
+    const payload = await fetchJson(`/api/profiles/${pid}/preprocess`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sourceIds, autoIndex: auto })
+    });
+    setJob(payload);
+    setStatus(`구조화(전처리)${auto ? " · 자동 색인" : ""} 중 (${sourceIds.length}개)`);
+  }
+
+  function toggleAutoApprove(value) {
+    const next = typeof value === "boolean" ? value : !autoApprove;
+    setAutoApprove(next);
+    localStorage.setItem("rag.autoApprove", next ? "1" : "0");
+  }
+
+  function toggleFolderTree(value) {
+    const next = typeof value === "boolean" ? value : !folderTree;
+    setFolderTree(next);
+    localStorage.setItem("rag.folderTree", next ? "1" : "0");
+  }
+
+  // Open a source's original content in a new tab (double-click in the tree).
+  function openSourceRaw(source) {
+    window.open(`/api/profiles/${source.profile_id}/sources/${source.id}/raw`, "_blank", "noopener");
+  }
+
+  // Open the review editor with the source's current structured Markdown.
+  async function openStructure(pid, sourceId) {
+    const list = sourcesByProfile[pid] || (await loadSources(pid));
+    const source = list.find((s) => s.id === sourceId);
+    if (!source) return;
+    setStructureModal({ pid, source, md: source.normalized_md || "", busy: false });
+  }
+
+  async function saveStructure() {
+    if (!structureModal) return;
+    setStructureModal((m) => ({ ...m, busy: true }));
+    try {
+      await fetchJson(`/api/profiles/${structureModal.pid}/sources/${structureModal.source.id}/normalized`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ markdown: structureModal.md })
+      });
+      await loadSources(structureModal.pid);
+      setStatus("구조화 저장됨 — 이제 임베딩하면 이 마크다운으로 색인됩니다");
+      setStructureModal(null);
+    } catch (e) {
+      setStatus(`구조화 저장 오류: ${e.message}`);
+      setStructureModal((m) => ({ ...m, busy: false }));
+    }
   }
 
   async function embedAll(pid, onlyPending = false) {
@@ -941,6 +1002,20 @@ function App() {
       return;
     }
 
+    if (cmd === "autoapprove" || cmd === "auto-approve") {
+      const on = /^(on|true|1|켜|켜기)$/i.test(rest) ? true : /^(off|false|0|꺼|끄기)$/i.test(rest) ? false : !autoApprove;
+      toggleAutoApprove(on);
+      pushSystem(`전처리 자동 승인(검토 없이 바로 색인): ${on ? "켜짐 ✅" : "꺼짐"}`);
+      return;
+    }
+
+    if (cmd === "foldertree" || cmd === "folder-tree") {
+      const on = /^(on|true|1|켜|켜기)$/i.test(rest) ? true : /^(off|false|0|꺼|끄기)$/i.test(rest) ? false : !folderTree;
+      toggleFolderTree(on);
+      pushSystem(`폴더 추가 시 폴더 구조를 소스로 색인: ${on ? "켜짐 ✅" : "꺼짐"}`);
+      return;
+    }
+
     const pid = activeProfileId;
     if (!pid) { pushSystem("활성 Agent가 없습니다."); return; }
 
@@ -1093,7 +1168,7 @@ function App() {
 
   async function runChat() {
     const text = query.trim();
-    if (!text || busy) return;
+    if ((!text && !attachments.length) || busy) return;
     if (text.startsWith("/")) {
       setQuery("");
       setSuggest(null);
@@ -1103,16 +1178,18 @@ function App() {
     const { profileId, agentName, cleanText } = parseMention(text);
     const targetId = profileId || activeProfileId;
     if (!targetId) return;
+    const images = attachments;
     setQuery("");
+    setAttachments([]);
     setSuggest(null);
-    await sendMessage(cleanText || text, chatMode, targetId, agentName);
+    await sendMessage(cleanText || text, chatMode, targetId, agentName, images);
   }
 
-  async function sendMessage(text, mode, targetId = activeProfileId, agentName = "") {
+  async function sendMessage(text, mode, targetId = activeProfileId, agentName = "", images = []) {
     if (!targetId) return;
     const modeLabel = modes.find((m) => m.key === mode)?.label;
     const crossAgent = agentName && targetId !== activeProfileId ? agentName : "";
-    const userMsg = { id: String(Date.now()), role: "user", content: text, mode, modeLabel, agentName: crossAgent };
+    const userMsg = { id: String(Date.now()), role: "user", content: text, mode, modeLabel, agentName: crossAgent, images };
     setMessages((prev) => [...prev, userMsg]);
     setBusy(true);
     setStatus("답변 생성 중");
@@ -1120,7 +1197,7 @@ function App() {
       const payload = await fetchJson(`/api/profiles/${targetId}/chat`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ query: text, topK: 4, mode })
+        body: JSON.stringify({ query: text, topK: 4, mode, images })
       });
       const cites = (payload.citations || []).map((c) => ({ ...c, query: text }));
       const used = new Set([...String(payload.answer).matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
@@ -1203,7 +1280,8 @@ function App() {
 
   function openCitationPopup(citation) {
     const locatorParts = [];
-    if (citation.locator?.relativePath) locatorParts.push(citation.locator.relativePath);
+    if (citation.breadcrumb) locatorParts.push(citation.breadcrumb);
+    else if (citation.locator?.relativePath) locatorParts.push(citation.locator.relativePath);
     if (citation.locator?.page) locatorParts.push(`페이지 ${citation.locator.page}`);
     if (citation.locator?.slide) locatorParts.push(`슬라이드 ${citation.locator.slide}`);
     if (citation.locator?.sheet) locatorParts.push(`시트 ${citation.locator.sheet}`);
@@ -1455,8 +1533,9 @@ function App() {
           <div
             key={source.id}
             className={`tree-row file status-${source.status}`}
-            title={`${source.relative_path || source.title} · ${statusLabel(source.status)} · 드래그해서 다른 Agent로 복사`}
+            title={`${source.relative_path || source.title} · ${statusLabel(source.status)} · 더블클릭: 원본 열기 · 드래그해서 다른 Agent로 복사`}
             draggable
+            onDoubleClick={() => openSourceRaw(source)}
             onDragStart={(e) => {
               e.stopPropagation();
               e.dataTransfer.setData("application/x-rag-source", JSON.stringify({ sourceId: source.id, fromProfileId: pid }));
@@ -1512,10 +1591,45 @@ function App() {
             </>
           ) : (
             <>
+              <button onClick={() => { structureSources([menu.source.id], menu.pid); setMenu(null); }}><Sparkles size={14} />구조화(전처리)</button>
+              <button onClick={() => { openStructure(menu.pid, menu.source.id); setMenu(null); }}><FileText size={14} />구조화 검토·편집</button>
               <button onClick={() => { embedSources([menu.source.id], menu.pid); setMenu(null); }}><Zap size={14} />임베딩</button>
               <button className="danger" onClick={() => { removeSource(menu.source); setMenu(null); }}><Trash2 size={14} />삭제</button>
             </>
           )}
+        </div>
+      )}
+
+      {/* Preprocessing review: edit the structured Markdown before indexing */}
+      {structureModal && (
+        <div className="modal-overlay" onClick={() => setStructureModal(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>구조화 검토 — {structureModal.source.title}</h2>
+              <button className="icon-button" type="button" onClick={() => setStructureModal(null)}><X size={18} /></button>
+            </div>
+            <div className="settings-section">
+              <p className="skill-group-label">
+                전처리 에이전트가 만든 <strong>마크다운</strong>을 검토·수정하세요. 저장 후 임베딩하면 원문 대신 이 마크다운이
+                구조(제목·표) 기준으로 청킹·색인됩니다. 비우면 원문 추출 방식으로 되돌아갑니다.
+              </p>
+              <textarea
+                className="structure-editor"
+                rows={18}
+                value={structureModal.md}
+                onChange={(e) => setStructureModal((m) => ({ ...m, md: e.target.value }))}
+                placeholder={"# 대제목\n\n## 소제목\n\n| 추천 | 피해야 할 말 |\n| --- | --- |\n| … | … |"}
+              />
+              <div className="skill-repo-row">
+                <button type="button" className="secondary" onClick={() => structureSources([structureModal.source.id], structureModal.pid)}>
+                  <Sparkles size={15} />전처리 다시 실행
+                </button>
+                <button type="button" onClick={saveStructure} disabled={structureModal.busy}>
+                  {structureModal.busy ? "저장 중…" : "저장"}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -2091,9 +2205,18 @@ function App() {
                       {msg.role === "user" && msg.modeLabel && msg.mode !== "general" && (
                         <span className="bubble-mode">{msg.modeLabel}</span>
                       )}
-                      <p className="bubble-text">
-                        {msg.role === "assistant" ? renderAnswerText(msg.content, msg.citations, openCitationPopup) : msg.content}
-                      </p>
+                      {msg.role === "user" && msg.images?.length ? (
+                        <div className="bubble-images">
+                          {msg.images.map((src, i) => (
+                            <img key={i} src={src} alt={`첨부 ${i + 1}`} />
+                          ))}
+                        </div>
+                      ) : null}
+                      {(msg.content || msg.role === "assistant") && (
+                        <p className="bubble-text">
+                          {msg.role === "assistant" ? renderAnswerText(msg.content, msg.citations, openCitationPopup) : msg.content}
+                        </p>
+                      )}
                       {msg.role === "assistant" && msg.violations?.length ? (
                         <div className="msg-violations">
                           {msg.violations.map((v, i) => (
@@ -2184,6 +2307,18 @@ function App() {
                     ))}
                   </div>
                 )}
+                {attachments.length > 0 && (
+                  <div className="attach-row">
+                    {attachments.map((src, i) => (
+                      <div key={i} className="attach-chip">
+                        <img src={src} alt={`첨부 ${i + 1}`} />
+                        <button type="button" className="attach-x" title="첨부 제거" onClick={() => removeAttachment(i)}>
+                          <X size={11} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="ta-wrap" style={{ height: inputHeight }}>
                   <div className="ta-highlight" ref={highlightRef} aria-hidden="true">
                     {renderInputHighlight(query, profiles)}
@@ -2210,7 +2345,7 @@ function App() {
                     <button className="tool" type="button" title="폴더 추가" onClick={() => pickFolder(activeProfileId)}><FolderUp size={16} /></button>
                     <button className="tool" type="button" title="텍스트 추가" onClick={() => openTextDialog(activeProfileId)}><FileText size={16} /></button>
                     <button className="tool" type="button" title="URL 추가" onClick={() => openUrlDialog(activeProfileId)}><Link size={16} /></button>
-                    <button className="tool" type="button" title="스크린샷 검증 · 클릭=화면 공유 후 영역선택 / 또는 ⌃⌘⇧4로 캡처 후 ⌘V 붙여넣기" onClick={captureScreenshot}><Camera size={16} /></button>
+                    <button className="tool" type="button" title="이미지 첨부 · 클릭=화면 공유 후 영역선택 / 또는 스크린샷 복사 후 ⌘V 붙여넣기 → 프롬프트와 함께 비전 모델로 전송" onClick={captureScreenshot}><Camera size={16} /></button>
                     <span className="tool-sep" />
                     <button
                       className={`tool toggle ${autoIndex ? "on" : ""}`}
@@ -2219,6 +2354,22 @@ function App() {
                       onClick={() => toggleAutoIndex()}
                     >
                       <Zap size={16} />
+                    </button>
+                    <button
+                      className={`tool toggle ${autoApprove ? "on" : ""}`}
+                      type="button"
+                      title={`전처리 자동 승인(검토 없이 바로 색인): ${autoApprove ? "켜짐" : "꺼짐"}`}
+                      onClick={() => toggleAutoApprove()}
+                    >
+                      <Sparkles size={16} />
+                    </button>
+                    <button
+                      className={`tool toggle ${folderTree ? "on" : ""}`}
+                      type="button"
+                      title={`폴더 추가 시 폴더 구조를 소스로 색인: ${folderTree ? "켜짐" : "꺼짐"}`}
+                      onClick={() => toggleFolderTree()}
+                    >
+                      <FolderTree size={16} />
                     </button>
                   </div>
                   <button type="button" onClick={runChat} disabled={busy || !query.trim()} aria-label="전송" className="send-btn">
@@ -2245,6 +2396,7 @@ function App() {
                       <span className="citation-num">[{c.number}]</span>
                       <span className="citation-title">{c.title}</span>
                       {c.locator?.page && <span className="citation-loc">p.{c.locator.page}</span>}
+                      {c.breadcrumb && <span className="citation-crumb">{c.breadcrumb}</span>}
                     </button>
                   </li>
                 ))}
