@@ -171,7 +171,9 @@ export async function createApp(options = {}) {
   });
 
   app.post("/api/profiles/:profileId/sources/path", async (request, reply) => {
-    const sources = await rag.addPathSources(request.params.profileId, request.body?.path || "");
+    const sources = await rag.addPathSources(request.params.profileId, request.body?.path || "", {
+      useTree: request.body?.useTree === true || request.body?.useTree === "1"
+    });
     return reply.code(201).send({ sources });
   });
 

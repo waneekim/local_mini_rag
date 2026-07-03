@@ -11,6 +11,7 @@ import {
   File,
   FileText,
   Folder,
+  FolderTree,
   FolderUp,
   Globe,
   Link,
@@ -74,6 +75,8 @@ function App() {
   const [autoIndex, setAutoIndex] = useState(() => localStorage.getItem("rag.autoIndex") === "1");
   // Preprocess auto-approve: structure straight into indexing, skipping review.
   const [autoApprove, setAutoApprove] = useState(() => localStorage.getItem("rag.autoApprove") === "1");
+  // Folder tree: when adding a folder, also index its structure as a source.
+  const [folderTree, setFolderTree] = useState(() => localStorage.getItem("rag.folderTree") === "1");
   const [editingMode, setEditingMode] = useState(null); // mode being edited/created in settings
   const [crop, setCrop] = useState(null); // { src, w, h } captured screenshot to crop
   const [dragRect, setDragRect] = useState(null); // selection rect in client coords
@@ -177,6 +180,7 @@ function App() {
       { cmd: "types", desc: "임베딩 가능한 파일 형식" },
       { cmd: "autoindex", desc: "추가 시 자동 임베딩 켜기/끄기" },
       { cmd: "autoapprove", desc: "전처리 자동 승인(검토 없이 색인) 켜기/끄기" },
+      { cmd: "foldertree", desc: "폴더 추가 시 폴더 구조를 소스로 색인 켜기/끄기" },
       { cmd: "skills", desc: "설치된 스킬 목록" },
       { cmd: "help", desc: "도움말" }
     ];
@@ -569,6 +573,7 @@ function App() {
     try {
       const form = new FormData();
       for (const { file, name } of entries) form.append("files", file, name);
+      form.append("useTree", folderTree ? "1" : "0");
       const res = await fetchJson(`/api/profiles/${pid}/sources/files`, { method: "POST", body: form });
       await loadSources(pid);
       setStatus(`${res.sources.length}개 파일 추가됨`);
@@ -589,7 +594,7 @@ function App() {
       const res = await fetchJson(`/api/profiles/${pid}/sources/path`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ path })
+        body: JSON.stringify({ path, useTree: folderTree })
       });
       await loadSources(pid);
       setStatus(`${res.sources.length}개 소스 추가됨`);
@@ -767,6 +772,12 @@ function App() {
     const next = typeof value === "boolean" ? value : !autoApprove;
     setAutoApprove(next);
     localStorage.setItem("rag.autoApprove", next ? "1" : "0");
+  }
+
+  function toggleFolderTree(value) {
+    const next = typeof value === "boolean" ? value : !folderTree;
+    setFolderTree(next);
+    localStorage.setItem("rag.folderTree", next ? "1" : "0");
   }
 
   // Open a source's original content in a new tab (double-click in the tree).
@@ -1002,6 +1013,13 @@ function App() {
       const on = /^(on|true|1|켜|켜기)$/i.test(rest) ? true : /^(off|false|0|꺼|끄기)$/i.test(rest) ? false : !autoApprove;
       toggleAutoApprove(on);
       pushSystem(`전처리 자동 승인(검토 없이 바로 색인): ${on ? "켜짐 ✅" : "꺼짐"}`);
+      return;
+    }
+
+    if (cmd === "foldertree" || cmd === "folder-tree") {
+      const on = /^(on|true|1|켜|켜기)$/i.test(rest) ? true : /^(off|false|0|꺼|끄기)$/i.test(rest) ? false : !folderTree;
+      toggleFolderTree(on);
+      pushSystem(`폴더 추가 시 폴더 구조를 소스로 색인: ${on ? "켜짐 ✅" : "꺼짐"}`);
       return;
     }
 
@@ -2327,6 +2345,14 @@ function App() {
                       onClick={() => toggleAutoApprove()}
                     >
                       <Sparkles size={16} />
+                    </button>
+                    <button
+                      className={`tool toggle ${folderTree ? "on" : ""}`}
+                      type="button"
+                      title={`폴더 추가 시 폴더 구조를 소스로 색인: ${folderTree ? "켜짐" : "꺼짐"}`}
+                      onClick={() => toggleFolderTree()}
+                    >
+                      <FolderTree size={16} />
                     </button>
                   </div>
                   <button type="button" onClick={runChat} disabled={busy || !query.trim()} aria-label="전송" className="send-btn">

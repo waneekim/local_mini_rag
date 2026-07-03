@@ -532,8 +532,14 @@ class RagService {
   async addFileSources(profileId, parts) {
     this.ensureProfile(profileId);
     const created = [];
+    let useTree = false;
 
     for await (const part of parts) {
+      // A `useTree` form field toggles capturing the folder tree as a source.
+      if (part.type === "field") {
+        if (part.fieldname === "useTree") useTree = part.value === "true" || part.value === "1";
+        continue;
+      }
       if (part.type !== "file") continue;
       const sourceId = id("source");
       const relativePath = sanitizeFileName(normalizeUploadedFileName(part.filename));
@@ -566,6 +572,10 @@ class RagService {
     }
 
     if (!created.length) throw Object.assign(new Error("No files uploaded"), { statusCode: 400 });
+    if (useTree) {
+      const tree = this._addTreeSource(profileId, created);
+      if (tree) created.push(tree);
+    }
     touchProfile(this.db, profileId);
     return created;
   }
@@ -617,7 +627,7 @@ class RagService {
     return source;
   }
 
-  async addPathSources(profileId, inputPath) {
+  async addPathSources(profileId, inputPath, { useTree = false } = {}) {
     this.ensureProfile(profileId);
     const target = String(inputPath || "").trim();
     if (!target) throw Object.assign(new Error("Path is required"), { statusCode: 400 });
@@ -658,8 +668,43 @@ class RagService {
       insertSource(this.db, source);
       created.push(source);
     }
+    if (useTree) {
+      const tree = this._addTreeSource(profileId, created);
+      if (tree) created.push(tree);
+    }
     touchProfile(this.db, profileId);
     return created;
+  }
+
+  // Serialize a folder's tree into a Markdown source so the structure itself is
+  // indexed and queryable ("어느 폴더에?", "구성 요약"). Skips flat (no-nesting)
+  // uploads where a tree adds nothing.
+  _addTreeSource(profileId, sources) {
+    const paths = sources.map((s) => s.relative_path).filter((p) => p && p.includes("/"));
+    if (paths.length < 1) return null;
+    const root = paths[0].split("/")[0] || "folder";
+    const markdown = buildTreeMarkdown(root, paths);
+    const at = nowIso();
+    const source = {
+      id: id("source"),
+      profile_id: profileId,
+      kind: "folder-tree",
+      title: `📁 ${root} 구조`,
+      file_name: "",
+      relative_path: "",
+      mime_type: "text/markdown",
+      file_path: "",
+      pasted_text: markdown,
+      status: "pending",
+      error: "",
+      metadata_json: JSON.stringify({ input: "folder-tree", root, fileCount: paths.length }),
+      content_hash: hashText(markdown),
+      created_at: at,
+      updated_at: at,
+      indexed_at: ""
+    };
+    insertSource(this.db, source);
+    return source;
   }
 
   async copySource(targetProfileId, input) {
@@ -1412,6 +1457,36 @@ function walkDir(dir, relPrefix, out) {
       out.push({ abs, rel });
     }
   }
+}
+
+// Build an indented Markdown tree from a set of "root/dir/file" paths. Folders
+// get a trailing slash; entries are sorted with directories before files.
+export function buildTreeMarkdown(root, paths) {
+  const tree = {};
+  for (const path of paths) {
+    let node = tree;
+    for (const part of String(path).split("/")) {
+      if (!part) continue;
+      node[part] = node[part] || {};
+      node = node[part];
+    }
+  }
+  const lines = [`# 폴더 구조: ${root}`, ""];
+  const walk = (node, depth) => {
+    const names = Object.keys(node).sort((a, b) => {
+      const aDir = Object.keys(node[a]).length > 0;
+      const bDir = Object.keys(node[b]).length > 0;
+      if (aDir !== bDir) return aDir ? -1 : 1; // directories first
+      return a.localeCompare(b);
+    });
+    for (const name of names) {
+      const isDir = Object.keys(node[name]).length > 0;
+      lines.push(`${"  ".repeat(depth)}- ${name}${isDir ? "/" : ""}`);
+      walk(node[name], depth + 1);
+    }
+  };
+  walk(tree, 0);
+  return lines.join("\n");
 }
 
 export function htmlToText(html) {

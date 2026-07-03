@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,7 +8,7 @@ import { chunkDocuments } from "../src/rag/chunking.js";
 import { EmbeddingService, localNgramEmbedding } from "../src/rag/embedding.js";
 import { LlmProvider, parseJsonObject } from "../src/rag/llmProvider.js";
 import { RerankService } from "../src/rag/rerank.js";
-import { htmlToText } from "../src/rag/ragService.js";
+import { buildTreeMarkdown, htmlToText } from "../src/rag/ragService.js";
 import { normalizeUploadedFileName, sanitizeFileName } from "../src/rag/sanitize.js";
 import { cosineSimilarity } from "../src/rag/vectorMath.js";
 
@@ -412,6 +412,51 @@ test("source raw endpoint returns the original pasted text", async () => {
 
     const missing = await app.inject({ method: "GET", url: `/api/profiles/${p.id}/sources/nope/raw` });
     assert.equal(missing.statusCode, 404);
+  } finally {
+    await app.close();
+  }
+});
+
+test("buildTreeMarkdown renders a sorted, dir-first tree", () => {
+  const md = buildTreeMarkdown("root", ["root/contracts/2024/vendor.md", "root/readme.md", "root/contracts/nda.md"]);
+  assert.match(md, /# 폴더 구조: root/);
+  // directories sort before files at each level
+  assert.match(md, /- contracts\/[\s\S]*- readme\.md/);
+  assert.match(md, /- vendor\.md/);
+});
+
+test("folder tree: useTree adds a queryable structure source, off by default", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-tree-"));
+  const srcDir = await mkdtemp(join(tmpdir(), "tree-src-"));
+  await mkdir(join(srcDir, "contracts", "2024"), { recursive: true });
+  await writeFile(join(srcDir, "contracts", "2024", "vendor.md"), "벤더 계약은 2024년에 체결되었습니다.");
+  await writeFile(join(srcDir, "readme.md"), "이 폴더는 계약 문서를 담습니다.");
+
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: { describe: () => ({ provider: "test", model: "mock" }), generate: async () => ({ answer: "ok", provider: {}, raw: {} }) }
+  });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+
+    // Off: no folder-tree source.
+    const plain = await post(app, `/api/profiles/${p.id}/sources/path`, { path: srcDir });
+    assert.equal(plain.sources.some((s) => s.kind === "folder-tree"), false);
+
+    // On: a structure source is created and carries the tree.
+    const withTree = await post(app, `/api/profiles/${p.id}/sources/path`, { path: srcDir, useTree: true });
+    const tree = withTree.sources.find((s) => s.kind === "folder-tree");
+    assert.ok(tree, "expected a folder-tree source");
+    assert.match(tree.pasted_text, /contracts\//);
+    assert.match(tree.pasted_text, /vendor\.md/);
+
+    // It indexes and the structure becomes queryable.
+    const job = await post(app, `/api/profiles/${p.id}/index`, { sourceIds: [tree.id] });
+    await waitForJob(app, job.id);
+    const search = await post(app, `/api/profiles/${p.id}/search`, { query: "폴더 구조 contracts" });
+    assert.equal(search.hits.some((h) => h.sourceKind === "folder-tree"), true);
   } finally {
     await app.close();
   }
