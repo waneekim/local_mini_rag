@@ -171,6 +171,24 @@ test("non-instruct embedding models leave query text unchanged", async () => {
   assert.equal(bodies[0].input[0], "hello");
 });
 
+test("tei-style reranker posts query+texts and normalizes a top-level array", async () => {
+  const calls = [];
+  const service = new RerankService({
+    url: "http://tei.local/rerank",
+    style: "tei",
+    fetchFn: async (url, options) => {
+      calls.push({ url, body: JSON.parse(options.body) });
+      // TEI returns a bare array, not {results:[…]}.
+      return { ok: true, json: async () => [{ index: 1, score: 0.87 }, { index: 0, score: 0.12 }] };
+    }
+  });
+  const out = await service.rerank("환불 며칠?", ["점심 메뉴", "환불은 7일 이내"]);
+  assert.deepEqual(calls[0].body, { query: "환불 며칠?", texts: ["점심 메뉴", "환불은 7일 이내"] });
+  const byIndex = Object.fromEntries(out.map((r) => [r.index, r.score]));
+  assert.equal(byIndex[1], 0.87);
+  assert.equal(byIndex[0], 0.12);
+});
+
 test("http reranker posts query+documents and normalizes relevance_score", async () => {
   const calls = [];
   const service = new RerankService({
@@ -717,6 +735,30 @@ test("central library: publish, export, and import into a second instance", asyn
   } finally {
     await host.close();
     await local.close();
+  }
+});
+
+test("settings test endpoint reports per-server connection status", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-conn-"));
+  process.env.RAG_URL_TIMEOUT_MS = "400"; // fail fast on the unreachable probe
+  const app = await createApp({ dataDir, logger: false, cleanupDataDir: true });
+  try {
+    // No LLM URL yet + no embedding server → clear guidance, local embeddings OK.
+    let res = await post(app, "/api/settings/test", { llm: { baseUrl: "" }, embedding: {} });
+    assert.equal(res.llm.ok, false);
+    assert.match(res.llm.detail, /URL/);
+    assert.equal(res.embedding.ok, true);
+
+    // Unreachable server → ok:false with a readable message (never a throw).
+    res = await post(app, "/api/settings/test", {
+      llm: { baseUrl: "http://127.0.0.1:1/v1", apiKey: "k" },
+      embedding: { url: "http://127.0.0.1:1/v1/embeddings" }
+    });
+    assert.equal(res.llm.ok, false);
+    assert.equal(res.embedding.ok, false);
+  } finally {
+    delete process.env.RAG_URL_TIMEOUT_MS;
+    await app.close();
   }
 });
 

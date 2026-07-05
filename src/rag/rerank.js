@@ -2,7 +2,8 @@
 // (query, passage) pair with a precision model, then the caller keeps the best.
 //
 // Two backends:
-//   http  — Cohere/Jina/vLLM-compatible POST {model, query, documents} → results[].relevance_score
+//   http  — Cohere/Jina/vLLM/llama.cpp-compatible POST {model, query, documents} → results[].relevance_score
+//           (RERANK_STYLE=tei switches the body to TEI's {query, texts} shape)
 //   llm   — reuse the configured chat LLM to score candidates (no extra server)
 // Off by default: set RERANK_URL (http) or RAG_RERANK=llm to enable.
 
@@ -17,6 +18,9 @@ export class RerankService {
     this.model = options.model || process.env.RERANK_MODEL || "";
     this.apiKey = options.apiKey || process.env.RERANK_API_KEY || "";
     this.backend = options.backend || process.env.RAG_RERANK || (this.url ? "http" : "none");
+    // Request body dialect: "cohere" (default — model/query/documents/top_n, used by
+    // Cohere, Jina, vLLM, llama.cpp) or "tei" (HuggingFace TEI — query/texts).
+    this.style = String(options.style || process.env.RERANK_STYLE || "cohere").toLowerCase();
     // How many top embedding candidates to rerank per query.
     this.candidates = Number(options.candidates || process.env.RAG_RERANK_CANDIDATES || 24);
     const envMin = process.env.RAG_RERANK_MIN_SCORE;
@@ -28,7 +32,7 @@ export class RerankService {
   }
 
   describe() {
-    return { backend: this.backend, model: this.model || "", candidates: this.candidates };
+    return { backend: this.backend, model: this.model || "", candidates: this.candidates, style: this.style };
   }
 
   // docs: string[]. Returns [{ index, score }] for every input doc (unsorted).
@@ -48,12 +52,11 @@ export class RerankService {
         "content-type": "application/json",
         ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {})
       },
-      body: JSON.stringify({
-        model: this.model || undefined,
-        query,
-        documents: docs,
-        top_n: docs.length
-      }),
+      body: JSON.stringify(
+        this.style === "tei"
+          ? { query, texts: docs } // TEI: {query, texts} → top-level [{index, score}]
+          : { model: this.model || undefined, query, documents: docs, top_n: docs.length }
+      ),
       signal: AbortSignal.timeout(Number(process.env.RERANK_TIMEOUT_MS || 30_000))
     });
     const payload = await response.json().catch(() => ({}));
@@ -80,11 +83,15 @@ export class RerankService {
 }
 
 function normalizeRerankPayload(payload, count) {
+  // Accepted shapes: {results:[…]} (Cohere/vLLM/llama.cpp), {data:[…]} (some
+  // OpenAI-style proxies), or a bare top-level array (HuggingFace TEI).
   const rows = Array.isArray(payload?.results)
     ? payload.results
     : Array.isArray(payload?.data)
       ? payload.data
-      : [];
+      : Array.isArray(payload)
+        ? payload
+        : [];
   if (!rows.length) return Array.from({ length: count }, (_, index) => ({ index, score: 0 }));
   return rows
     .map((row) => ({

@@ -42,6 +42,43 @@ const API = "";
 const ACCEPTED_FILE_TYPES =
   ".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xlsm,.xls,.txt,.md,.csv,.json,.html,.htm,.log,.png,.jpg,.jpeg,.tif,.tiff,.webp,.bmp";
 
+// One-click persona templates for the simple settings view. Keys must not
+// collide with the built-in modes (general/compliance/recommend).
+const PERSONA_TEMPLATES = [
+  {
+    key: "summary",
+    label: "문서 요약",
+    hint: "근거 문서를 핵심만 요약",
+    aliases: "요약, summary",
+    system:
+      "너는 문서 요약 전문가다. 컨텍스트의 근거만 사용해 핵심을 3~5개 불릿으로 요약하고, 각 불릿 끝에 근거 번호 [n]을 붙여라. 근거에 없는 내용은 추가하지 마라. 한국어로 답하라."
+  },
+  {
+    key: "ux-writing",
+    label: "UX 문구 제안",
+    hint: "스타일 가이드 반영 문구 후보 제안",
+    aliases: "문구, copy",
+    system:
+      "너는 삼성 가전 UX 라이터다. 요청한 화면 문구에 대해 컨텍스트의 스타일 가이드를 반영한 후보 3개를 제안하고, 각 후보에 선택 이유를 한 줄로 붙여라. 근거 번호 [n]을 인용하라. 한국어로 답하라."
+  },
+  {
+    key: "glossary-chat",
+    label: "용어 설명",
+    hint: "용어집 기준으로 단어 뜻·용법 답변",
+    aliases: "용어, term",
+    system:
+      "너는 UX 용어집 안내자다. 질문한 단어의 정의·용법·주의사항을 컨텍스트의 용어집 근거로만 답하고, 근거 번호 [n]을 인용하라. 용어집에 없는 단어면 '용어집에 등재되지 않은 단어'라고 명시하고 가장 가까운 승인어를 제안하라. 한국어로 답하라."
+  },
+  {
+    key: "translate-en",
+    label: "영문 변환",
+    hint: "한국어 UX 문구를 영문 스타일로",
+    aliases: "번역, translate",
+    system:
+      "너는 UX 문구 번역가다. 입력한 한국어 화면 문구를 간결한 영어 UX 문구로 바꿔라. 컨텍스트에 영문 스타일 가이드가 있으면 반영하고 근거 번호 [n]을 인용하라. 후보 2개와 추천 1개를 제시하라."
+  }
+];
+
 const SUPPORTED_TYPES_TEXT = [
   "임베딩 가능한 입력:",
   "• 문서: PDF, Word(.docx), PowerPoint(.pptx), Excel(.xlsx/.xlsm)",
@@ -118,6 +155,12 @@ function App() {
   const [settingsState, setSettingsState] = useState(null);
   const [presetName, setPresetName] = useState("");
   const [settingsForm, setSettingsForm] = useState(null);
+  // Simple-first settings: designers see one API-key field; the full form is
+  // behind "고급 설정". Default persona survives reloads via localStorage.
+  const [advancedSettings, setAdvancedSettings] = useState(false);
+  const [quickKey, setQuickKey] = useState("");
+  const [connTest, setConnTest] = useState(null); // null | {busy:true} | {llm:{ok,detail}, embedding:{ok,detail}}
+  const [defaultMode, setDefaultMode] = useState(() => localStorage.getItem("rag.defaultMode") || "");
 
   // Central library (shared RAG) + admin gating for a host instance.
   const [adminRequired, setAdminRequired] = useState(false);
@@ -1420,6 +1463,11 @@ function App() {
     ]);
     setSettingsState(state);
     loadPresetIntoForm(state, state.activePreset);
+    // Simple view first: seed the one-field key input from the active preset.
+    const active = state.presets[state.activePreset] || Object.values(state.presets)[0] || {};
+    setQuickKey(active.llm?.apiKey || "");
+    setConnTest(null);
+    setAdvancedSettings(false);
     setSkillRepo(skillCfg.repo || "");
     setAvailableSkills([]);
     setEditingMode(null);
@@ -1434,8 +1482,72 @@ function App() {
   async function loadModes() {
     const list = await fetchJson("/api/modes");
     setModes(list);
-    if (!list.some((m) => m.key === chatMode)) setChatMode(list[0]?.key || "general");
+    // Default persona (★) survives reloads: restore it whenever it still exists.
+    const stored = localStorage.getItem("rag.defaultMode");
+    if (stored && list.some((m) => m.key === stored)) {
+      setChatMode(stored);
+    } else if (!list.some((m) => m.key === chatMode)) {
+      setChatMode(list[0]?.key || "general");
+    }
     return list;
+  }
+
+  // ── Simple settings: one-key connect + persona quick manager ──
+
+  async function quickConnect() {
+    const key = quickKey.trim();
+    // One key powers both LLM and embeddings unless embeddings already has its own.
+    const form = {
+      ...settingsForm,
+      llm: { ...settingsForm.llm, apiKey: key },
+      embedding: { ...settingsForm.embedding, apiKey: settingsForm.embedding.apiKey || key }
+    };
+    setSettingsForm(form);
+    setConnTest({ busy: true });
+    try {
+      const state = await fetchJson("/api/settings", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: presetName || settingsState.activePreset || "기본", ...form })
+      });
+      setSettingsState(state);
+      const result = await fetchJson("/api/settings/test", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(form)
+      });
+      setConnTest(result);
+      const ok = result.llm?.ok && result.embedding?.ok;
+      setStatus(ok ? "연결 완료 — 바로 대화를 시작할 수 있습니다" : "연결 확인 실패 — 메시지를 확인하세요");
+      if (ok) boot(); // refresh health/model badge
+    } catch (e) {
+      setConnTest({ llm: { ok: false, detail: e.message }, embedding: { ok: false, detail: "" } });
+    }
+  }
+
+  async function addPersona(template) {
+    try {
+      await fetchJson("/api/modes", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(template)
+      });
+      await loadModes();
+      setStatus(`페르소나 추가됨: ${template.label}`);
+    } catch (e) {
+      window.alert(`페르소나 추가 오류: ${e.message}`);
+    }
+  }
+
+  function toggleDefaultPersona(key) {
+    const next = defaultMode === key ? "" : key;
+    setDefaultMode(next);
+    if (next) {
+      localStorage.setItem("rag.defaultMode", next);
+      setChatMode(next);
+    } else {
+      localStorage.removeItem("rag.defaultMode");
+    }
   }
 
   function startEditMode(m) {
@@ -1983,6 +2095,91 @@ function App() {
               <button className="icon-button" type="button" onClick={() => setSettingsOpen(false)}><X size={18} /></button>
             </div>
 
+            {/* Simple view: API key → connect. Everything else stays behind 고급 설정. */}
+            {!advancedSettings && (
+              <>
+                <div className="settings-section">
+                  <h3>빠른 연결</h3>
+                  <p className="skill-group-label">
+                    서버 주소·모델은 미리 설정되어 있습니다. <strong>API Key만 입력하고 연결</strong>하면 바로 사용할 수 있어요.
+                  </p>
+                  <div className="quick-server">
+                    <span className="quick-server-name">{presetName || settingsState.activePreset}</span>
+                    <span className="optional">{settingsForm.llm.model || "모델 미지정"} · {settingsForm.llm.baseUrl || "서버 미지정"}</span>
+                  </div>
+                  <div className="skill-repo-row">
+                    <input
+                      type="password"
+                      value={quickKey}
+                      onChange={(e) => setQuickKey(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") quickConnect(); }}
+                      placeholder="API Key 붙여넣기 (없는 서버면 비워두고 연결)"
+                      autoFocus
+                    />
+                    <button type="button" onClick={quickConnect} disabled={connTest?.busy}>
+                      {connTest?.busy ? "확인 중…" : "연결하기"}
+                    </button>
+                  </div>
+                  {connTest && !connTest.busy && (
+                    <div className="conn-results">
+                      <div className={`conn-row ${connTest.llm?.ok ? "ok" : "bad"}`}>
+                        {connTest.llm?.ok ? "✅" : "❌"} 대화 모델 — {connTest.llm?.detail}
+                      </div>
+                      <div className={`conn-row ${connTest.embedding?.ok ? "ok" : "bad"}`}>
+                        {connTest.embedding?.ok ? "✅" : "❌"} 문서 검색(임베딩) — {connTest.embedding?.detail}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="settings-section">
+                  <h3>페르소나 <span className="optional">(대화 모드 · ★=기본)</span></h3>
+                  <p className="skill-group-label">
+                    ★를 누르면 <strong>기본 페르소나</strong>로 저장되어 다음 접속에도 선택되어 있습니다.
+                  </p>
+                  {modes.map((m) => (
+                    <div key={m.key} className="skill-row">
+                      <button
+                        type="button"
+                        className={`mini star ${defaultMode === m.key ? "on" : ""}`}
+                        title={defaultMode === m.key ? "기본 페르소나 해제" : "기본 페르소나로 지정"}
+                        onClick={() => toggleDefaultPersona(m.key)}
+                      >
+                        {defaultMode === m.key ? "★" : "☆"}
+                      </button>
+                      <div className="skill-meta"><strong>{m.label}</strong><span>{m.hint}</span></div>
+                      <button className="mini danger" type="button" title="삭제" onClick={() => deleteMode(m.key)} disabled={modes.length <= 1}>
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  ))}
+                  {PERSONA_TEMPLATES.some((t) => !modes.some((m) => m.key === t.key)) && (
+                    <>
+                      <p className="skill-group-label" style={{ marginTop: 10 }}>추가할 수 있는 페르소나</p>
+                      <div className="examples">
+                        {PERSONA_TEMPLATES.filter((t) => !modes.some((m) => m.key === t.key)).map((t) => (
+                          <button key={t.key} type="button" className="chip" title={t.hint} onClick={() => addPersona(t)} disabled={modes.length >= 10}>
+                            + {t.label}
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                <div className="settings-section">
+                  <button type="button" className="secondary" onClick={() => setAdvancedSettings(true)}>
+                    <Settings size={14} /> 고급 설정 (서버 주소·프리셋·스킬…)
+                  </button>
+                </div>
+              </>
+            )}
+
+            {advancedSettings && (
+              <>
+            <div className="settings-section">
+              <button type="button" className="secondary mini-btn" onClick={() => setAdvancedSettings(false)}>← 간단 설정으로</button>
+            </div>
             <div className="settings-section">
               <h3>프리셋 <span className="optional">(집 / 회사 등 환경별 저장)</span></h3>
               <div className="preset-row">
@@ -2198,10 +2395,14 @@ function App() {
                 )}
               </div>
             </div>
+              </>
+            )}
 
             <div className="modal-footer">
-              <button type="button" className="secondary" onClick={() => setSettingsOpen(false)}>취소</button>
-              <button type="button" onClick={saveSettings} disabled={!presetName.trim()}>저장 · 적용</button>
+              <button type="button" className="secondary" onClick={() => setSettingsOpen(false)}>{advancedSettings ? "취소" : "닫기"}</button>
+              {advancedSettings && (
+                <button type="button" onClick={saveSettings} disabled={!presetName.trim()}>저장 · 적용</button>
+              )}
             </div>
           </div>
         </div>
