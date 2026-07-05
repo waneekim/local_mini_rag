@@ -1125,6 +1125,20 @@ input:focus, select:focus, textarea:focus {
 .lint-hits { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
 .lint-hit { padding: 8px 10px; border-radius: 8px; background: rgba(210, 153, 34, 0.14); font-size: 0.84rem; }
 .lint-rule { margin-top: 3px; opacity: 0.75; font-size: 0.78rem; }
+/* ── Simple settings: quick connect + persona manager ── */
+.quick-server {
+  display: flex; flex-direction: column; gap: 2px; margin: 8px 0 10px;
+  padding: 9px 12px; border-radius: 10px; background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border, #2a2a2a); font-size: 0.85rem;
+}
+.quick-server-name { font-weight: 700; }
+.conn-results { display: flex; flex-direction: column; gap: 4px; margin-top: 9px; font-size: 0.84rem; }
+.conn-row { padding: 7px 10px; border-radius: 8px; }
+.conn-row.ok { background: rgba(46, 160, 67, 0.14); }
+.conn-row.bad { background: rgba(229, 83, 75, 0.14); }
+.mini.star { font-size: 0.95rem; line-height: 1; }
+.mini.star.on { color: #e8b93c; }
+
 /* ── Glossary (word dictionary) + integrated review ── */
 .review-out { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 .review-answer {

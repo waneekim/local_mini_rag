@@ -738,6 +738,30 @@ test("central library: publish, export, and import into a second instance", asyn
   }
 });
 
+test("settings test endpoint reports per-server connection status", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-conn-"));
+  process.env.RAG_URL_TIMEOUT_MS = "400"; // fail fast on the unreachable probe
+  const app = await createApp({ dataDir, logger: false, cleanupDataDir: true });
+  try {
+    // No LLM URL yet + no embedding server → clear guidance, local embeddings OK.
+    let res = await post(app, "/api/settings/test", { llm: { baseUrl: "" }, embedding: {} });
+    assert.equal(res.llm.ok, false);
+    assert.match(res.llm.detail, /URL/);
+    assert.equal(res.embedding.ok, true);
+
+    // Unreachable server → ok:false with a readable message (never a throw).
+    res = await post(app, "/api/settings/test", {
+      llm: { baseUrl: "http://127.0.0.1:1/v1", apiKey: "k" },
+      embedding: { url: "http://127.0.0.1:1/v1/embeddings" }
+    });
+    assert.equal(res.llm.ok, false);
+    assert.equal(res.embedding.ok, false);
+  } finally {
+    delete process.env.RAG_URL_TIMEOUT_MS;
+    await app.close();
+  }
+});
+
 test("admin token gates mutations but leaves reads open", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "rag-admin-"));
   process.env.ARK_ADMIN_TOKEN = "s3cret";

@@ -121,6 +121,20 @@ export async function createApp(options = {}) {
 
   app.get("/api/settings", async () => settingsStore.state());
 
+  // Probe the configured OpenAI-compatible servers WITHOUT saving, so a
+  // designer can see "연결됨 ✓ / 키 오류 ✗" immediately after typing an API key.
+  app.post("/api/settings/test", async (request) => {
+    const body = request.body || {};
+    const llmKey = body.llm?.apiKey || "";
+    const embUrl = String(body.embedding?.url || "");
+    return {
+      llm: await probeOpenAiServer(body.llm?.baseUrl || "", llmKey),
+      embedding: embUrl
+        ? await probeOpenAiServer(embUrl.replace(/\/embeddings\/?$/, ""), body.embedding?.apiKey || llmKey)
+        : { ok: true, detail: "로컬 임베딩 사용 (별도 서버 불필요)" }
+    };
+  });
+
   app.put("/api/settings", async (request) => {
     rag.applySettings(request.body || {});
     return settingsStore.state();
@@ -395,6 +409,28 @@ function isPublicRequest(request) {
     path.endsWith("/review") ||
     path.endsWith("/feedback")
   );
+}
+
+// GET {baseUrl}/models — the cheapest call every OpenAI-compatible server
+// (LM Studio, vLLM, OpenAI, …) supports, and it validates the API key too.
+async function probeOpenAiServer(baseUrl, apiKey) {
+  const url = String(baseUrl || "").trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(url)) return { ok: false, detail: "서버 URL이 설정되지 않았습니다." };
+  try {
+    const response = await fetch(`${url}/models`, {
+      headers: { accept: "application/json", ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) },
+      signal: AbortSignal.timeout(Number(process.env.RAG_URL_TIMEOUT_MS || 8000))
+    });
+    if (response.status === 401 || response.status === 403) {
+      return { ok: false, detail: "인증 실패 — API Key를 확인하세요." };
+    }
+    if (!response.ok) return { ok: false, detail: `서버 응답 오류 (HTTP ${response.status})` };
+    const payload = await response.json().catch(() => ({}));
+    const count = Array.isArray(payload?.data) ? payload.data.length : null;
+    return { ok: true, detail: count != null ? `연결됨 · 모델 ${count}개` : "연결됨" };
+  } catch (error) {
+    return { ok: false, detail: `서버에 연결할 수 없습니다: ${error.message}` };
+  }
 }
 
 function extractAdminToken(request) {
