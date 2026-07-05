@@ -15,6 +15,14 @@ import { cosineSimilarity, lexicalScore } from "./vectorMath.js";
 import { WorkerClient } from "./workerClient.js";
 import { RerankService } from "./rerank.js";
 import { RULE_EXTRACTION_SYSTEM, lintText, buildRuleBlock, parseRuleRecords, normalizeRuleInput } from "./rules.js";
+import {
+  GLOSSARY_EXTRACTION_SYSTEM,
+  buildGlossaryBlock,
+  checkText,
+  normalizeGlossaryInput,
+  normalizeTermKey,
+  parseGlossaryRecords
+} from "./glossary.js";
 
 const DEFAULT_TOP_K = 8;
 
@@ -420,6 +428,166 @@ class RagService {
     this.ensureProfile(profileId);
     const rules = this.listRules(profileId, { status: "approved" });
     return { violations: lintText(text, rules), ruleCount: rules.length };
+  }
+
+  // --- UX glossary (key-based term dictionary) -------------------------------
+  // Terms are matched by exact normalized-key lookup (longest-match scan), so
+  // "이 단어가 용어집에 있나 / 없나"를 결정론적으로 답한다. LLM 초안 추출은
+  // rules와 같은 draft → confirm 검토 흐름을 따른다.
+
+  listGlossary(profileId, { status, reviewStatus } = {}) {
+    this.ensureProfile(profileId);
+    let sql = "SELECT * FROM glossary_terms WHERE profile_id = ?";
+    const params = [profileId];
+    if (status) {
+      sql += " AND status = ?";
+      params.push(status);
+    }
+    if (reviewStatus) {
+      sql += " AND review_status = ?";
+      params.push(reviewStatus);
+    }
+    sql += " ORDER BY category ASC, term ASC";
+    return all(this.db, sql, ...params).map(hydrateGlossaryTerm);
+  }
+
+  upsertGlossaryTerm(profileId, input = {}) {
+    this.ensureProfile(profileId);
+    const at = nowIso();
+    const existing = input.id
+      ? one(this.db, "SELECT * FROM glossary_terms WHERE id = ? AND profile_id = ?", input.id, profileId)
+      : null;
+    const base = existing ? hydrateGlossaryTerm(existing) : {};
+    // Merge provided keys over the existing record so a partial PATCH (e.g.
+    // { reviewStatus: "confirmed" }) never wipes the other fields.
+    const fields = normalizeGlossaryInput({
+      term: input.term ?? base.term,
+      status: input.status ?? base.status,
+      preferred: input.preferred ?? base.preferred,
+      definition: input.definition ?? base.definition,
+      category: input.category ?? base.category,
+      aliases: input.aliases ?? base.aliases
+    });
+    if (!fields.term) throw Object.assign(new Error("term is required"), { statusCode: 400 });
+    const reviewStatus =
+      input.reviewStatus === "draft" || input.reviewStatus === "confirmed"
+        ? input.reviewStatus
+        : existing?.review_status || "confirmed";
+    const normKey = normalizeTermKey(fields.term);
+
+    if (existing) {
+      run(
+        this.db,
+        `UPDATE glossary_terms SET term = ?, norm_key = ?, status = ?, preferred = ?, definition = ?, category = ?,
+         aliases_json = ?, review_status = ?, updated_at = ? WHERE id = ? AND profile_id = ?`,
+        fields.term, normKey, fields.status, fields.preferred, fields.definition, fields.category,
+        JSON.stringify(fields.aliases), reviewStatus, at, input.id, profileId
+      );
+      return hydrateGlossaryTerm(one(this.db, "SELECT * FROM glossary_terms WHERE id = ?", input.id));
+    }
+
+    // New term: collapse duplicates onto the existing row for the same key.
+    const dup = one(this.db, "SELECT * FROM glossary_terms WHERE profile_id = ? AND norm_key = ?", profileId, normKey);
+    if (dup) return this.upsertGlossaryTerm(profileId, { ...input, id: dup.id });
+
+    const termId = id("term");
+    run(
+      this.db,
+      `INSERT INTO glossary_terms
+       (id, profile_id, term, norm_key, status, preferred, definition, category, aliases_json, source_id, review_status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      termId, profileId, fields.term, normKey, fields.status, fields.preferred, fields.definition,
+      fields.category, JSON.stringify(fields.aliases), String(input.sourceId || ""), reviewStatus, at, at
+    );
+    return hydrateGlossaryTerm(one(this.db, "SELECT * FROM glossary_terms WHERE id = ?", termId));
+  }
+
+  deleteGlossaryTerm(profileId, termId) {
+    this.ensureProfile(profileId);
+    run(this.db, "DELETE FROM glossary_terms WHERE id = ? AND profile_id = ?", termId, profileId);
+    return { ok: true };
+  }
+
+  // Deterministic word check: which glossary terms appear (and their verdicts),
+  // and which Hangul content words are NOT in the glossary at all.
+  checkGlossary(profileId, text) {
+    this.ensureProfile(profileId);
+    const terms = this.listGlossary(profileId, { reviewStatus: "confirmed" });
+    return { ...checkText(text, terms), termCount: terms.length };
+  }
+
+  // LLM-assisted import: read glossary pages (one term per Confluence page),
+  // ask the LLM for term records, store them as drafts for review.
+  async extractGlossary(profileId, input = {}) {
+    this.ensureProfile(profileId);
+    const sourceIds = Array.isArray(input.sourceIds) && input.sourceIds.length
+      ? input.sourceIds
+      : all(this.db, "SELECT id FROM sources WHERE profile_id = ?", profileId).map((r) => r.id);
+    if (typeof this.llm.complete !== "function") {
+      throw Object.assign(new Error("현재 LLM 설정으로는 용어 추출을 할 수 없습니다."), { statusCode: 400 });
+    }
+
+    const windows = [];
+    for (const sourceId of sourceIds) {
+      const text = this._sourceText(sourceId);
+      for (let i = 0; i < text.length && windows.length < 20; i += 3500) {
+        const slice = text.slice(i, i + 3500).trim();
+        if (slice) windows.push({ sourceId, text: slice });
+      }
+    }
+
+    const created = [];
+    for (const window of windows) {
+      let out = "";
+      try {
+        out = await this.llm.complete({ system: GLOSSARY_EXTRACTION_SYSTEM, user: window.text });
+      } catch (error) {
+        this.logger?.warn?.(`glossary extraction failed: ${error.message}`);
+        continue;
+      }
+      for (const record of parseGlossaryRecords(out)) {
+        created.push(
+          this.upsertGlossaryTerm(profileId, { ...record, sourceId: window.sourceId, reviewStatus: "draft" })
+        );
+      }
+    }
+    return { created: created.length, terms: created };
+  }
+
+  // Integrated review: glossary word check + rule lint + style-guide retrieval,
+  // all injected into one LLM pass that returns the corrected sentence.
+  async review(profileId, input = {}) {
+    const text = String(input.text || "").trim();
+    if (!text) throw Object.assign(new Error("text is required"), { statusCode: 400 });
+
+    const glossary = this.checkGlossary(profileId, text);
+    const rules = this.listRules(profileId, { status: "approved" });
+    const violations = rules.length ? lintText(text, rules) : [];
+
+    // Style-guide grounding via the normal retrieval pipeline.
+    const envelope = await this.buildContext(profileId, { ...input, query: text });
+    const blocks = [buildGlossaryBlock(glossary), buildRuleBlock(violations, rules)].filter(Boolean);
+    if (blocks.length) envelope.contextText = `${blocks.join("\n\n")}\n\n${envelope.contextText}`;
+
+    const tGen = performance.now();
+    const result = await this.llm.generate({
+      query: text,
+      envelope,
+      system: REVIEW_SYSTEM
+    });
+    const answerMs = Math.round(performance.now() - tGen);
+
+    return {
+      profileId,
+      text,
+      answer: result.answer,
+      terms: glossary.terms,
+      missing: glossary.missing,
+      violations,
+      citations: envelope.citations,
+      timings: { ...(envelope.timings || {}), answerMs },
+      provider: result.provider
+    };
   }
 
   // --- Feedback (self-improving memory) -------------------------------------
@@ -1382,6 +1550,41 @@ class RagService {
 }
 
 const RULE_MODES = new Set(["compliance", "recommend"]);
+
+// System prompt for the integrated review pass (glossary + rules + style RAG).
+const REVIEW_SYSTEM =
+  "너는 삼성 가전 UX 라이팅 검수기다. 입력 문장을 컨텍스트의 스타일 가이드와 용어집 검수 결과에 따라 교정한다.\n" +
+  "출력 형식:\n" +
+  "1) 교정문: 한 줄로 완성된 최종 문장.\n" +
+  "2) 이유: 적용한 가이드/용어 교체를 짧게 항목별로 (근거 번호 [n] 인용).\n" +
+  "규칙: 비권장/금지 단어는 반드시 권장어로 교체하고, 미등록 후보는 승인어로 바꾸거나 등록 검토를 제안한다. 의미를 바꾸지 말고 창작하지 마라.";
+
+function hydrateGlossaryTerm(row) {
+  if (!row) return null;
+  const aliases = (() => {
+    try {
+      const parsed = JSON.parse(row.aliases_json || "[]");
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  })();
+  return {
+    id: row.id,
+    profileId: row.profile_id,
+    term: row.term,
+    normKey: row.norm_key,
+    status: row.status,
+    preferred: row.preferred,
+    definition: row.definition,
+    category: row.category,
+    aliases,
+    sourceId: row.source_id,
+    reviewStatus: row.review_status,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
 
 function hydrateFeedback(row) {
   if (!row) return null;

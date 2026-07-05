@@ -87,6 +87,26 @@ export function createDatabase(dbPath) {
     );
     CREATE INDEX IF NOT EXISTS idx_rules_profile ON rules(profile_id);
 
+    -- UX glossary: key-based dictionary of approved terms. Unlike \`rules\`
+    -- (a handful of curated writing principles), this holds hundreds of words
+    -- and is matched by exact normalized-key lookup, never by substring/vector.
+    CREATE TABLE IF NOT EXISTS glossary_terms (
+      id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+      term TEXT NOT NULL,
+      norm_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'approved',
+      preferred TEXT NOT NULL DEFAULT '',
+      definition TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL DEFAULT '',
+      aliases_json TEXT NOT NULL DEFAULT '[]',
+      source_id TEXT NOT NULL DEFAULT '',
+      review_status TEXT NOT NULL DEFAULT 'confirmed',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_glossary_profile_key ON glossary_terms(profile_id, norm_key);
+
     CREATE TABLE IF NOT EXISTS feedback (
       id TEXT PRIMARY KEY,
       profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,

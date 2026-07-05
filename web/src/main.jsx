@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  BookOpen,
   Bot,
   Camera,
   ChevronDown,
@@ -131,6 +132,14 @@ function App() {
   const [rules, setRules] = useState([]);
   // Preprocessing agent: review/edit a source's structured Markdown before indexing.
   const [structureModal, setStructureModal] = useState(null); // { pid, source, md, busy }
+  // UX glossary (word dictionary) + integrated sentence review.
+  const [glossaryModal, setGlossaryModal] = useState(null); // { profileId }
+  const [glossaryTerms, setGlossaryTerms] = useState([]);
+  const [glossaryBusy, setGlossaryBusy] = useState(false);
+  const [termForm, setTermForm] = useState({ term: "", status: "approved", preferred: "" });
+  const [reviewInput, setReviewInput] = useState("");
+  const [reviewResult, setReviewResult] = useState(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
   const [ruleBusy, setRuleBusy] = useState(false);
   const [lintInput, setLintInput] = useState("");
   const [lintResult, setLintResult] = useState(null);
@@ -483,6 +492,88 @@ function App() {
       setLintResult(await fetchJson(`/api/profiles/${pid}/lint`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: lintInput }) }));
     } catch (error) {
       setStatus(`검사 실패: ${error.message}`);
+    }
+  }
+
+  // ── UX glossary + integrated review ──
+
+  async function openGlossary(pid) {
+    setGlossaryModal({ profileId: pid });
+    setTermForm({ term: "", status: "approved", preferred: "" });
+    setReviewInput("");
+    setReviewResult(null);
+    setGlossaryTerms([]);
+    try {
+      setGlossaryTerms(await fetchJson(`/api/profiles/${pid}/glossary`));
+    } catch (error) {
+      setStatus(`용어집 로드 실패: ${error.message}`);
+    }
+  }
+
+  async function addGlossaryTerm() {
+    const pid = glossaryModal?.profileId;
+    if (!pid || !termForm.term.trim()) return;
+    try {
+      await fetchJson(`/api/profiles/${pid}/glossary`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(termForm)
+      });
+      setGlossaryTerms(await fetchJson(`/api/profiles/${pid}/glossary`));
+      setTermForm({ term: "", status: "approved", preferred: "" });
+    } catch (error) {
+      setStatus(`용어 추가 실패: ${error.message}`);
+    }
+  }
+
+  async function patchGlossaryTerm(termId, patch) {
+    const pid = glossaryModal?.profileId;
+    const updated = await fetchJson(`/api/profiles/${pid}/glossary/${termId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch)
+    });
+    setGlossaryTerms((prev) => prev.map((t) => (t.id === termId ? updated : t)));
+  }
+
+  async function deleteGlossaryTerm(termId) {
+    const pid = glossaryModal?.profileId;
+    await fetchJson(`/api/profiles/${pid}/glossary/${termId}`, { method: "DELETE" });
+    setGlossaryTerms((prev) => prev.filter((t) => t.id !== termId));
+  }
+
+  async function extractGlossary() {
+    const pid = glossaryModal?.profileId;
+    if (!pid) return;
+    setGlossaryBusy(true);
+    setStatus("용어집 페이지에서 단어 추출 중… (문서가 길면 걸립니다)");
+    try {
+      const r = await fetchJson(`/api/profiles/${pid}/glossary/extract`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      setGlossaryTerms(await fetchJson(`/api/profiles/${pid}/glossary`));
+      setStatus(`용어 ${r.created}개 초안 생성됨 — 검토 후 확정하세요`);
+    } catch (error) {
+      setStatus(`용어 추출 실패: ${error.message}`);
+    } finally {
+      setGlossaryBusy(false);
+    }
+  }
+
+  // Integrated review: glossary word verdicts + style-guide rewrite in one pass.
+  async function runReview() {
+    const pid = glossaryModal?.profileId;
+    if (!pid || !reviewInput.trim() || reviewBusy) return;
+    setReviewBusy(true);
+    setReviewResult(null);
+    try {
+      setReviewResult(await fetchJson(`/api/profiles/${pid}/review`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: reviewInput, topK: 4 })
+      }));
+    } catch (error) {
+      setStatus(`검수 실패: ${error.message}`);
+    } finally {
+      setReviewBusy(false);
     }
   }
 
@@ -1587,6 +1678,7 @@ function App() {
               <button onClick={() => { openTextDialog(menu.pid); setMenu(null); }}><FileText size={14} />텍스트 추가</button>
               <button onClick={() => { openUrlDialog(menu.pid); setMenu(null); }}><Link size={14} />URL 추가</button>
               <button onClick={() => { openRules(menu.pid); setMenu(null); }}><ClipboardCheck size={14} />규칙(가이드)</button>
+              <button onClick={() => { openGlossary(menu.pid); setMenu(null); }}><BookOpen size={14} />용어집(단어 검수)</button>
               <button onClick={() => { openFeedback(menu.pid); setMenu(null); }}><ThumbsUp size={14} />피드백 학습</button>
             </>
           ) : (
@@ -1628,6 +1720,94 @@ function App() {
                   {structureModal.busy ? "저장 중…" : "저장"}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* UX glossary + integrated review modal */}
+      {glossaryModal && (
+        <div className="modal-overlay" onClick={() => setGlossaryModal(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>용어집 — {profiles.find((p) => p.id === glossaryModal.profileId)?.name || "Agent"}</h2>
+              <button className="icon-button" type="button" onClick={() => setGlossaryModal(null)}><X size={18} /></button>
+            </div>
+
+            <div className="settings-section">
+              <p className="skill-group-label">
+                문장을 넣으면 <strong>스타일 가이드 + 용어집</strong>을 한 번에 검수하고 교정문을 제안합니다.
+              </p>
+              <div className="skill-repo-row">
+                <input value={reviewInput} onChange={(e) => setReviewInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") runReview(); }} placeholder="예: 사용자의 냉장고를 연동해 주세요" />
+                <button type="button" className="secondary" onClick={runReview} disabled={reviewBusy || !reviewInput.trim()}>
+                  {reviewBusy ? "검수 중…" : "검수"}
+                </button>
+              </div>
+              {reviewResult && (
+                <div className="review-out">
+                  <div className="review-answer">{reviewResult.answer}</div>
+                  {(reviewResult.terms || []).filter((t) => t.status !== "approved").map((t, i) => (
+                    <div key={`t${i}`} className="lint-hit">
+                      {t.status === "forbidden" ? "🔴 금지어" : "🟡 비권장어"} <b>'{t.surface}'</b>
+                      {t.preferred ? <> → 권장 <b>{t.preferred}</b></> : null}
+                      {t.category ? <span className="optional"> · {t.category}</span> : null}
+                    </div>
+                  ))}
+                  {(reviewResult.missing || []).map((m, i) => (
+                    <div key={`m${i}`} className="lint-hit">🔴 용어집에 없음 <b>'{m.base}'</b><span className="optional"> · 등록 검토 대상</span></div>
+                  ))}
+                  {(reviewResult.violations || []).map((v, i) => (
+                    <div key={`v${i}`} className="lint-hit">⚠️ 규칙 위반 <b>'{v.match}'</b>{v.suggest ? <> → 권장 <b>{v.suggest}</b></> : null}</div>
+                  ))}
+                  {!((reviewResult.terms || []).some((t) => t.status !== "approved") || reviewResult.missing?.length || reviewResult.violations?.length) && (
+                    <p className="empty tiny">단어 지적 사항 없음 — 모든 단어가 승인어입니다.</p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="settings-section">
+              <p className="skill-group-label">용어 가져오기 <span className="optional">(용어집 페이지 소스에서 LLM 초안 추출)</span></p>
+              <button type="button" className="secondary" onClick={extractGlossary} disabled={glossaryBusy}>
+                <Sparkles size={15} />{glossaryBusy ? "추출 중…" : "소스에서 용어 추출 (초안)"}
+              </button>
+            </div>
+
+            <div className="settings-section">
+              <p className="skill-group-label">용어 {glossaryTerms.length}개 <span className="optional">(확정 {glossaryTerms.filter((t) => t.reviewStatus === "confirmed").length})</span></p>
+              <div className="skill-repo-row term-add">
+                <input value={termForm.term} onChange={(e) => setTermForm((f) => ({ ...f, term: e.target.value }))} placeholder="단어 (예: 에어컨)" />
+                <select value={termForm.status} onChange={(e) => setTermForm((f) => ({ ...f, status: e.target.value }))}>
+                  <option value="approved">승인</option>
+                  <option value="deprecated">비권장</option>
+                  <option value="forbidden">금지</option>
+                </select>
+                <input value={termForm.preferred} onChange={(e) => setTermForm((f) => ({ ...f, preferred: e.target.value }))} placeholder="권장 대체어" />
+                <button type="button" className="secondary" onClick={addGlossaryTerm} disabled={!termForm.term.trim()}><Plus size={14} /></button>
+              </div>
+              {glossaryTerms.length ? glossaryTerms.map((t) => (
+                <div key={t.id} className={`rule-row ${t.reviewStatus === "confirmed" ? "approved" : "draft"}`}>
+                  <div className="rule-main">
+                    <div className="rule-head">
+                      <span className={`term-badge ${t.status}`}>{t.status === "approved" ? "승인어" : t.status === "deprecated" ? "비권장" : "금지"}</span>
+                      <strong>{t.term}</strong>
+                      {t.preferred ? <span className="optional">→ {t.preferred}</span> : null}
+                      {t.category ? <span className="optional"> · {t.category}</span> : null}
+                      {t.reviewStatus !== "confirmed" && <span className="rule-badge draft">초안</span>}
+                    </div>
+                    {t.definition ? <p className="term-def">{t.definition}</p> : null}
+                  </div>
+                  <div className="rule-actions">
+                    {t.reviewStatus !== "confirmed" && (
+                      <button type="button" className="mini" title="확정" onClick={() => patchGlossaryTerm(t.id, { reviewStatus: "confirmed" })}>✓</button>
+                    )}
+                    <button type="button" className="mini danger" title="삭제" onClick={() => deleteGlossaryTerm(t.id)}><Trash2 size={12} /></button>
+                  </div>
+                </div>
+              )) : (
+                <p className="empty tiny">아직 용어가 없습니다. 직접 추가하거나 소스에서 추출하세요.</p>
+              )}
             </div>
           </div>
         </div>

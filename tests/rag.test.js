@@ -9,6 +9,7 @@ import { EmbeddingService, localNgramEmbedding } from "../src/rag/embedding.js";
 import { LlmProvider, parseJsonObject } from "../src/rag/llmProvider.js";
 import { RerankService } from "../src/rag/rerank.js";
 import { buildTreeMarkdown, htmlToText } from "../src/rag/ragService.js";
+import { checkText, normalizeTermKey, scanTerms, buildTermIndex, stripJosa } from "../src/rag/glossary.js";
 import { normalizeUploadedFileName, sanitizeFileName } from "../src/rag/sanitize.js";
 import { cosineSimilarity } from "../src/rag/vectorMath.js";
 
@@ -549,6 +550,117 @@ test("folder scoping: drill-down restricts retrieval and breadcrumbs the hit", a
     assert.equal(scoped.hits.length > 0, true);
     assert.equal(scoped.hits.every((h) => h.folderPath === `${rootName}/contracts/2024`), true);
     assert.match(scoped.hits[0].breadcrumb, /contracts > 2024 > vendor\.md/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("glossary engine: longest-match scan, alias resolution, josa stripping, missing words", () => {
+  const terms = [
+    { id: "t1", term: "에어컨", status: "approved", aliases: ["에어콘"], definition: "표준 제품명" },
+    { id: "t2", term: "설정", status: "approved", aliases: ["셋팅", "세팅"], preferred: "" },
+    { id: "t3", term: "냉장고", status: "approved" },
+    { id: "t4", term: "연동", status: "deprecated", preferred: "연결" },
+    { id: "t5", term: "자동 모드", status: "approved" }
+  ];
+
+  assert.equal(normalizeTermKey(" Smart Things "), "smartthings");
+  assert.equal(stripJosa("냉장고를"), "냉장고");
+  assert.equal(stripJosa("에어컨에서는"), "에어컨");
+
+  // Longest match wins: "자동 모드" beats a hypothetical shorter key.
+  const built = buildTermIndex(terms);
+  const hits = scanTerms("에어콘 자동 모드를 셋팅하시겠습니까?", built);
+  const surfaces = hits.map((h) => `${h.surface}→${h.entry.term}`);
+  assert.equal(surfaces.includes("에어콘→에어컨"), true); // alias → canonical
+  assert.equal(surfaces.includes("셋팅→설정"), true); // matched inside a longer token
+  assert.equal(surfaces.some((s) => s.startsWith("자동 모드")), true);
+
+  // checkText: verdicts + provable absence.
+  const out = checkText("유저가 냉장고를 연동해 주세요", terms);
+  const byTerm = Object.fromEntries(out.terms.map((t) => [t.term, t]));
+  assert.equal(byTerm["냉장고"].status, "approved"); // josa-stripped stem resolved
+  assert.equal(byTerm["연동"].status, "deprecated");
+  assert.equal(byTerm["연동"].preferred, "연결");
+  assert.equal(out.missing.some((m) => m.base === "유저"), true); // not in glossary
+  assert.equal(out.missing.some((m) => m.base === "냉장고"), false);
+});
+
+test("glossary API: upsert/check, drafts excluded until confirmed, dedupe by key", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-gl-"));
+  const app = await createApp({ dataDir, logger: false, cleanupDataDir: true });
+  try {
+    const p = await post(app, "/api/profiles", { name: "용어집" });
+
+    await post(app, `/api/profiles/${p.id}/glossary`, { term: "에어컨", status: "approved", aliases: ["에어콘"] });
+    const dep = await post(app, `/api/profiles/${p.id}/glossary`, { term: "연동", status: "deprecated", preferred: "연결" });
+    // Draft term is invisible to the checker until confirmed.
+    const draft = await post(app, `/api/profiles/${p.id}/glossary`, { term: "셋팅", status: "forbidden", preferred: "설정", reviewStatus: "draft" });
+
+    let check = await post(app, `/api/profiles/${p.id}/glossary/check`, { text: "에어콘 연동 셋팅" });
+    assert.equal(check.terms.some((t) => t.term === "에어컨"), true);
+    assert.equal(check.terms.find((t) => t.term === "연동").preferred, "연결");
+    assert.equal(check.terms.some((t) => t.term === "셋팅"), false); // draft hidden
+    assert.equal(check.missing.some((m) => m.base === "셋팅"), true);
+
+    // Confirm the draft → now it participates with its verdict.
+    await app.inject({
+      method: "PATCH",
+      url: `/api/profiles/${p.id}/glossary/${draft.id}`,
+      payload: { reviewStatus: "confirmed" },
+      headers: { "content-type": "application/json" }
+    });
+    check = await post(app, `/api/profiles/${p.id}/glossary/check`, { text: "셋팅을 확인" });
+    assert.equal(check.terms.find((t) => t.term === "셋팅").status, "forbidden");
+
+    // Same normalized key collapses onto one row instead of duplicating.
+    const dup = await post(app, `/api/profiles/${p.id}/glossary`, { term: "연동", definition: "기술 문서 한정" });
+    assert.equal(dup.id, dep.id);
+    assert.equal(dup.preferred, "연결"); // merge kept the earlier fields
+    assert.equal((await get(app, `/api/profiles/${p.id}/glossary`)).length, 3);
+  } finally {
+    await app.close();
+  }
+});
+
+test("integrated review: glossary + rules + style RAG injected into one corrected pass", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-rev-"));
+  let capturedContext = "";
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      complete: async () => "[]",
+      generate: async ({ envelope }) => {
+        capturedContext = envelope.contextText;
+        return { answer: "교정문: 내 냉장고를 연결하세요", provider: {}, raw: {} };
+      }
+    }
+  });
+  try {
+    const p = await post(app, "/api/profiles", { name: "검수" });
+    // Style guide source for RAG grounding.
+    await post(app, `/api/profiles/${p.id}/sources/text`, { title: "보이스앤톤", text: "사용자는 '나'로 지칭한다." });
+    const job = await post(app, `/api/profiles/${p.id}/index`, {});
+    await waitForJob(app, job.id);
+    // A rule (approved) and glossary terms.
+    await post(app, `/api/profiles/${p.id}/rules`, { principle: "사용자는 '나'로 지칭", terms: ["사용자"], prefer: ["나", "내"], status: "approved" });
+    await post(app, `/api/profiles/${p.id}/glossary`, { term: "연동", status: "deprecated", preferred: "연결" });
+    await post(app, `/api/profiles/${p.id}/glossary`, { term: "냉장고", status: "approved" });
+
+    const review = await post(app, `/api/profiles/${p.id}/review`, { text: "사용자의 냉장고를 연동해 주세요" });
+
+    // Deterministic layers surfaced in the response…
+    assert.equal(review.violations.some((v) => v.match === "사용자"), true);
+    assert.equal(review.terms.find((t) => t.term === "연동").preferred, "연결");
+    assert.equal(review.answer.includes("교정문"), true);
+    // …and injected into the LLM context alongside the style guide.
+    assert.match(capturedContext, /용어집 검수/);
+    assert.match(capturedContext, /비권장어 '연동' → 권장: 연결/);
+    assert.match(capturedContext, /규칙 기반 자동 감지/);
+    assert.match(capturedContext, /사용자는 '나'로 지칭한다/); // RAG hit
   } finally {
     await app.close();
   }

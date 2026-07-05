@@ -268,6 +268,42 @@ export async function createApp(options = {}) {
     return rag.lint(request.params.profileId, request.body?.text || "");
   });
 
+  // UX glossary (key-based term dictionary).
+  app.get("/api/profiles/:profileId/glossary", async (request) => {
+    return rag.listGlossary(request.params.profileId, {
+      status: request.query?.status,
+      reviewStatus: request.query?.reviewStatus
+    });
+  });
+
+  app.post("/api/profiles/:profileId/glossary", async (request, reply) => {
+    const term = rag.upsertGlossaryTerm(request.params.profileId, request.body || {});
+    return reply.code(201).send(term);
+  });
+
+  app.patch("/api/profiles/:profileId/glossary/:termId", async (request) => {
+    return rag.upsertGlossaryTerm(request.params.profileId, { ...(request.body || {}), id: request.params.termId });
+  });
+
+  app.delete("/api/profiles/:profileId/glossary/:termId", async (request) => {
+    return rag.deleteGlossaryTerm(request.params.profileId, request.params.termId);
+  });
+
+  app.post("/api/profiles/:profileId/glossary/extract", async (request, reply) => {
+    const result = await rag.extractGlossary(request.params.profileId, request.body || {});
+    return reply.code(201).send(result);
+  });
+
+  // Deterministic word check: glossary hits + words missing from the glossary.
+  app.post("/api/profiles/:profileId/glossary/check", async (request) => {
+    return rag.checkGlossary(request.params.profileId, request.body?.text || "");
+  });
+
+  // Integrated review: glossary + rules + style-guide RAG in one corrected answer.
+  app.post("/api/profiles/:profileId/review", async (request) => {
+    return rag.review(request.params.profileId, request.body || {});
+  });
+
   // Answer feedback (self-improving memory).
   app.get("/api/profiles/:profileId/feedback", async (request) => {
     return rag.listFeedback(request.params.profileId);
@@ -349,12 +385,14 @@ function isPublicRequest(request) {
   if (path === "/api/auth/verify") return true;
   if (path === "/api/validate" || path === "/api/vision/extract") return true;
   if (path === "/api/central/browse") return true;
-  // Viewers on a shared host may search/chat/lint and leave feedback.
+  // Viewers on a shared host may search/chat/lint/review and leave feedback.
   return (
     path.endsWith("/search") ||
     path.endsWith("/context") ||
     path.endsWith("/chat") ||
     path.endsWith("/lint") ||
+    path.endsWith("/glossary/check") ||
+    path.endsWith("/review") ||
     path.endsWith("/feedback")
   );
 }
