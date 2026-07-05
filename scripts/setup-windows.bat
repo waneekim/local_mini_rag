@@ -32,8 +32,15 @@ if errorlevel 1 ( echo ❌ npm install 실패 & pause & exit /b 1 )
 call npm run build
 if errorlevel 1 ( echo ❌ 빌드 실패 & pause & exit /b 1 )
 
-rem 4) 서버 실행 + 브라우저 열기
-echo ── 서버를 시작합니다. 이 창을 닫으면 ARK도 종료됩니다.
-start "" "http://localhost:8787"
-call npm start
+rem 4) 데스크톱(트레이) 앱 실행 — 브라우저 불필요.
+rem    Ctrl+Shift+Space 로 창 열기/숨기기, 종료는 작업표시줄 트레이 아이콘 → 종료.
+echo ── ARK 데스크톱 앱을 시작합니다 ^(트레이 상주 · Ctrl+Shift+Space^)
+call npx --no-install electron --version >nul 2>nul
+if errorlevel 1 (
+  echo ⚠️ 데스크톱 모듈이 없어 브라우저 모드로 실행합니다.
+  start "" "http://localhost:8787"
+  call npm start
+) else (
+  call npx --no-install electron .
+)
 pause

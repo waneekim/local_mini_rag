@@ -15,11 +15,29 @@
    을 받아 압축 해제 (또는 `git clone`).
 3. **더블클릭 실행** — 폴더 안 `scripts/setup-mac.command`(macOS) 또는
    `scripts/setup-windows.bat`(Windows)를 더블클릭. 설치 → `.env` 자동 생성(LM Studio 기본값) →
-   서버 실행 → 브라우저(`http://localhost:8787`)까지 자동 진행됩니다.
+   **데스크톱(트레이) 앱** 실행까지 자동 진행됩니다.
    Node.js가 없으면 설치 페이지가 자동으로 열립니다(LTS 설치 후 다시 더블클릭).
 
 이후 ⚙️ 빠른 연결에서 키 없이 **[연결하기]** 만 누르면 ✅ 확인 후 바로 사용할 수 있습니다.
 로컬 기본 설정은 `.env.local-example`에 있으며 스크립트가 자동 복사합니다.
+
+### 데스크톱(트레이) 앱
+
+브라우저 대신 **하나의 채팅창 프로그램**으로 씁니다. 서버는 앱 안에서 함께 실행됩니다.
+
+- **전역 단축키 `Ctrl+Shift+Space`**(mac은 `Cmd`)로 어디서든 창 열기/숨기기 (`ARK_HOTKEY`로 변경)
+- 창을 닫아도 **시스템 트레이에 상주** — 트레이 아이콘 클릭=열기/숨기기, 우클릭 메뉴에서 종료
+- **파일·폴더를 창에 드래그앤드롭** → 바로 지식으로 추가 → 대화
+- 데이터는 OS 사용자 폴더(`userData/data`)에 저장되어 앱을 지워도 재설치 시 유지
+
+```bash
+npm run desktop            # 빌드 후 트레이 앱 실행
+npm run desktop:dist:win   # Windows 설치 파일(.exe · NSIS) 생성
+npm run desktop:dist:mac   # macOS .dmg 생성
+```
+
+배포 시에는 위 명령으로 만든 설치 파일 하나만 전달하면 됩니다(수신자는 Node.js도 필요 없음 ·
+LM Studio만 설치). PDF/Office 추출 워커는 시스템 `python3`를 사용합니다.
 
 ## 빠른 시작 (개발자)
 

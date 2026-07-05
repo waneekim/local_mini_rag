@@ -29,7 +29,13 @@ echo "── 패키지 설치 중 (수 분 소요) ..."
 npm install
 npm run build
 
-# 4) 서버 실행 + 브라우저 열기
-echo "── 서버를 시작합니다. 이 창을 닫으면 ARK도 종료됩니다."
-( sleep 2 && open "http://localhost:8787" ) &
-npm start
+# 4) 데스크톱(트레이) 앱 실행 — 브라우저 불필요.
+#    Cmd+Shift+Space 로 창 열기/숨기기, 종료는 메뉴바 트레이 아이콘 → 종료.
+echo "── ARK 데스크톱 앱을 시작합니다 (트레이 상주 · Cmd+Shift+Space)"
+if npx --no-install electron --version >/dev/null 2>&1; then
+  npx --no-install electron .
+else
+  echo "⚠️ 데스크톱 모듈이 없어 브라우저 모드로 실행합니다."
+  ( sleep 2 && open "http://localhost:8787" ) &
+  npm start
+fi

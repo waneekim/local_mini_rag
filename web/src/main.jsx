@@ -2138,19 +2138,19 @@ function App() {
             </div>
 
             <div className="settings-section install-step">
-              <h3><span className="step-no">3</span> 더블클릭 설치 · 실행</h3>
+              <h3><span className="step-no">3</span> 더블클릭 설치 · 실행 (트레이 앱)</h3>
               <p className="skill-group-label">
-                푼 폴더 안 <b>scripts</b>에서 내 운영체제 파일을 <b>더블클릭</b>하면 — 설치 → 로컬 설정(.env) 생성 →
-                서버 실행 → 브라우저 열기까지 자동으로 진행됩니다.
+                푼 폴더 안 <b>scripts</b>에서 내 운영체제 파일을 <b>더블클릭</b>하면 — 설치 → 로컬 설정 생성 →
+                <b> 데스크톱 앱(트레이 상주)</b> 실행까지 자동으로 진행됩니다. 브라우저가 필요 없어요.
               </p>
               <ul className="install-list">
-                <li>macOS: <code>scripts/setup-mac.command</code></li>
-                <li>Windows: <code>scripts/setup-windows.bat</code></li>
+                <li>macOS: <code>scripts/setup-mac.command</code> · Windows: <code>scripts/setup-windows.bat</code></li>
                 <li>Node.js가 없으면 설치 페이지가 자동으로 열립니다 (LTS 설치 후 다시 더블클릭)</li>
               </ul>
               <p className="skill-group-label">
-                실행되면 <code>http://localhost:8787</code>이 열립니다. LM Studio 서버가 켜져 있으면
-                <b> API Key 없이</b> ⚙️ 빠른 연결에서 [연결하기]만 누르면 바로 사용 가능해요.
+                실행 후: <b>Ctrl+Shift+Space</b>(mac은 Cmd)로 언제든 채팅창 열기/숨기기 · 창을 닫아도
+                트레이에 남아 계속 동작 · <b>파일/폴더를 창에 드래그앤드롭</b>하면 바로 지식으로 추가됩니다.
+                LM Studio가 켜져 있으면 <b>API Key 없이</b> ⚙️ 빠른 연결에서 [연결하기]만 누르면 끝.
               </p>
             </div>
 
