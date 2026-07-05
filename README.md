@@ -4,7 +4,24 @@
 파일·폴더·텍스트·로컬 경로·URL을 넣어 임베딩하고, 목적별 모드 챗봇으로 활용합니다. LLM과
 임베딩은 OpenAI 호환 엔드포인트(LM Studio, 사내 서버 등)에 연결합니다.
 
-## 빠른 시작
+## 가장 쉬운 설치 — 완전 로컬 패키지 (디자이너용 · API Key 불필요)
+
+회사 API Key 없이 **내 PC에서 전부 도는** 구성입니다. 앱 좌측 상단 ⬇️(내 PC에 설치) 버튼에도
+같은 가이드가 들어 있습니다.
+
+1. **LM Studio 설치** — https://lmstudio.ai (무료). 앱 안에서 채팅 모델(추천 `qwen2.5-7b-instruct`)과
+   임베딩 모델(추천 `bge-m3`)을 다운로드해 로드하고 **Local Server → Start**(포트 1234).
+2. **ARK 다운로드** — [ZIP](https://github.com/waneekim/local_mini_rag/archive/refs/heads/main.zip)
+   을 받아 압축 해제 (또는 `git clone`).
+3. **더블클릭 실행** — 폴더 안 `scripts/setup-mac.command`(macOS) 또는
+   `scripts/setup-windows.bat`(Windows)를 더블클릭. 설치 → `.env` 자동 생성(LM Studio 기본값) →
+   서버 실행 → 브라우저(`http://localhost:8787`)까지 자동 진행됩니다.
+   Node.js가 없으면 설치 페이지가 자동으로 열립니다(LTS 설치 후 다시 더블클릭).
+
+이후 ⚙️ 빠른 연결에서 키 없이 **[연결하기]** 만 누르면 ✅ 확인 후 바로 사용할 수 있습니다.
+로컬 기본 설정은 `.env.local-example`에 있으며 스크립트가 자동 복사합니다.
+
+## 빠른 시작 (개발자)
 
 ```bash
 npm install
