@@ -161,6 +161,8 @@ function App() {
   const [quickKey, setQuickKey] = useState("");
   const [connTest, setConnTest] = useState(null); // null | {busy:true} | {llm:{ok,detail}, embedding:{ok,detail}}
   const [defaultMode, setDefaultMode] = useState(() => localStorage.getItem("rag.defaultMode") || "");
+  // "내 PC에 설치" guide: full local package (LM Studio + ARK), no API key needed.
+  const [installOpen, setInstallOpen] = useState(false);
 
   // Central library (shared RAG) + admin gating for a host instance.
   const [adminRequired, setAdminRequired] = useState(false);
@@ -1539,6 +1541,13 @@ function App() {
     }
   }
 
+  function copyText(text) {
+    navigator.clipboard?.writeText(text).then(
+      () => setStatus("복사됨 — 터미널/탐색기에 붙여넣으세요"),
+      () => setStatus("복사 실패 — 직접 선택해서 복사하세요")
+    );
+  }
+
   function toggleDefaultPersona(key) {
     const next = defaultMode === key ? "" : key;
     setDefaultMode(next);
@@ -2087,6 +2096,74 @@ function App() {
       )}
 
       {/* Settings modal */}
+      {/* "내 PC에 설치" — complete local package guide (LM Studio + ARK) */}
+      {installOpen && (
+        <div className="modal-overlay" onClick={() => setInstallOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>내 PC에 설치 — 완전 로컬 패키지</h2>
+              <button className="icon-button" type="button" onClick={() => setInstallOpen(false)}><X size={18} /></button>
+            </div>
+
+            <div className="settings-section">
+              <p className="skill-group-label">
+                회사 API Key 없이, <strong>내 컴퓨터에서 전부 도는</strong> 구성입니다. 아래 3단계면 끝나요.
+                데이터·대화가 PC 밖으로 나가지 않습니다.
+              </p>
+            </div>
+
+            <div className="settings-section install-step">
+              <h3><span className="step-no">1</span> LM Studio 설치 (무료 · AI 엔진)</h3>
+              <p className="skill-group-label">모델을 실행해 주는 프로그램입니다. 설치 후 앱 안에서:</p>
+              <ul className="install-list">
+                <li>🔍 검색에서 <b>채팅 모델</b>(추천 <code>qwen2.5-7b-instruct</code>)과 <b>임베딩 모델</b>(추천 <code>bge-m3</code>) 다운로드</li>
+                <li>두 모델을 로드하고 <b>Local Server → Start</b> (초록불 · 포트 1234)</li>
+              </ul>
+              <div className="install-actions">
+                <a className="link-btn" href="https://lmstudio.ai" target="_blank" rel="noreferrer">LM Studio 다운로드 ↗</a>
+              </div>
+            </div>
+
+            <div className="settings-section install-step">
+              <h3><span className="step-no">2</span> ARK 다운로드</h3>
+              <div className="install-actions">
+                <a className="link-btn" href="https://github.com/waneekim/local_mini_rag/archive/refs/heads/main.zip" target="_blank" rel="noreferrer">
+                  ZIP 다운로드 ↗
+                </a>
+                <button type="button" className="secondary mini-btn" onClick={() => copyText("git clone https://github.com/waneekim/local_mini_rag.git")}>
+                  git 명령 복사
+                </button>
+              </div>
+              <p className="skill-group-label">ZIP은 압축을 풀어 원하는 폴더에 두면 됩니다.</p>
+            </div>
+
+            <div className="settings-section install-step">
+              <h3><span className="step-no">3</span> 더블클릭 설치 · 실행 (트레이 앱)</h3>
+              <p className="skill-group-label">
+                푼 폴더 안 <b>scripts</b>에서 내 운영체제 파일을 <b>더블클릭</b>하면 — 설치 → 로컬 설정 생성 →
+                <b> 데스크톱 앱(트레이 상주)</b> 실행까지 자동으로 진행됩니다. 브라우저가 필요 없어요.
+              </p>
+              <ul className="install-list">
+                <li>macOS: <code>scripts/setup-mac.command</code> · Windows: <code>scripts/setup-windows.bat</code></li>
+                <li>Node.js가 없으면 설치 페이지가 자동으로 열립니다 (LTS 설치 후 다시 더블클릭)</li>
+              </ul>
+              <p className="skill-group-label">
+                실행 후: <b>Ctrl+Shift+Space</b>(mac은 Cmd)로 언제든 채팅창 열기/숨기기 · 창을 닫아도
+                트레이에 남아 계속 동작 · <b>파일/폴더를 창에 드래그앤드롭</b>하면 바로 지식으로 추가됩니다.
+                LM Studio가 켜져 있으면 <b>API Key 없이</b> ⚙️ 빠른 연결에서 [연결하기]만 누르면 끝.
+              </p>
+            </div>
+
+            <div className="settings-section">
+              <p className="skill-group-label optional">
+                문제가 생기면: LM Studio Local Server가 켜져 있는지(포트 1234), 모델 이름이 .env의
+                <code> LLM_MODEL</code>/<code>EMBEDDINGS_MODEL</code>과 같은지 확인하세요. 자세한 내용은 README 참고.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {settingsOpen && settingsForm && settingsState && (
         <div className="modal-overlay" onClick={() => setSettingsOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -2417,7 +2494,10 @@ function App() {
             <p className="brand-full">Agent RAG Knowledge</p>
             <p className="brand-model">{health?.llmProvider?.model || health?.llmProvider?.provider || "checking"}</p>
           </div>
-          <button className="icon-button" type="button" title="설정" onClick={openSettings} style={{ marginLeft: "auto" }}>
+          <button className="icon-button" type="button" title="내 PC에 설치 (완전 로컬 패키지)" onClick={() => setInstallOpen(true)} style={{ marginLeft: "auto" }}>
+            <Download size={18} />
+          </button>
+          <button className="icon-button" type="button" title="설정" onClick={openSettings}>
             <Settings size={18} />
           </button>
         </div>
