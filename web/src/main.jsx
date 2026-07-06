@@ -164,6 +164,8 @@ function App() {
   const [defaultMode, setDefaultMode] = useState(() => localStorage.getItem("rag.defaultMode") || "");
   // "내 PC에 설치" guide: full local package (LM Studio + ARK), no API key needed.
   const [installOpen, setInstallOpen] = useState(false);
+  // In-app document viewer (double-click a source): shows what the document says.
+  const [viewer, setViewer] = useState(null); // { pid, loading, data }
 
   // Central library (shared RAG) + admin gating for a host instance.
   const [adminRequired, setAdminRequired] = useState(false);
@@ -1022,9 +1024,22 @@ function App() {
     localStorage.setItem("rag.folderTree", next ? "1" : "0");
   }
 
-  // Open a source's original content in a new tab (double-click in the tree).
+  // Open a source's original content in a new tab.
   function openSourceRaw(source) {
     window.open(`/api/profiles/${source.profile_id}/sources/${source.id}/raw`, "_blank", "noopener");
+  }
+
+  // Double-click a source → in-app viewer with the document's readable content
+  // (reviewed Markdown / extracted text — works for xlsx·docx·pdf too).
+  async function openSourceViewer(source) {
+    setViewer({ pid: source.profile_id, loading: true, data: { title: source.title } });
+    try {
+      const data = await fetchJson(`/api/profiles/${source.profile_id}/sources/${source.id}/content`);
+      setViewer({ pid: source.profile_id, loading: false, data });
+    } catch (e) {
+      setViewer(null);
+      setStatus(`문서 열기 실패: ${e.message}`);
+    }
   }
 
   // Open the review editor with the source's current structured Markdown.
@@ -1859,9 +1874,9 @@ function App() {
           <div
             key={source.id}
             className={`tree-row file status-${source.status}`}
-            title={`${source.relative_path || source.title} · ${statusLabel(source.status)} · 더블클릭: 원본 열기 · 드래그해서 다른 Agent로 복사`}
+            title={`${source.relative_path || source.title} · ${statusLabel(source.status)} · 더블클릭: 문서 보기 · 드래그해서 다른 Agent로 복사`}
             draggable
-            onDoubleClick={() => openSourceRaw(source)}
+            onDoubleClick={() => openSourceViewer(source)}
             onDragStart={(e) => {
               e.stopPropagation();
               e.dataTransfer.setData("application/x-rag-source", JSON.stringify({ sourceId: source.id, fromProfileId: pid }));
@@ -2293,6 +2308,45 @@ function App() {
       )}
 
       {/* Settings modal */}
+      {/* Document viewer — double-click a source to read it in place */}
+      {viewer && (
+        <div className="modal-overlay" onClick={() => setViewer(null)}>
+          <div className="modal viewer-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>{viewer.data?.title || "문서"}</h2>
+              <button className="icon-button" type="button" onClick={() => setViewer(null)}><X size={18} /></button>
+            </div>
+            {viewer.loading ? (
+              <p className="empty">불러오는 중…</p>
+            ) : (
+              <>
+                {viewer.data.relativePath && viewer.data.relativePath !== viewer.data.title && (
+                  <p className="viewer-path">{viewer.data.relativePath}</p>
+                )}
+                {viewer.data.content ? (
+                  <pre className="viewer-body">{viewer.data.content}</pre>
+                ) : (
+                  <p className="empty">
+                    아직 읽을 수 있는 내용이 없습니다 — 임베딩(⚡)하면 추출된 내용이 여기에 표시됩니다.
+                  </p>
+                )}
+                <div className="install-actions viewer-actions">
+                  {viewer.data.url ? (
+                    <a className="link-btn" href={viewer.data.url} target="_blank" rel="noreferrer">원본 페이지 열기 ↗</a>
+                  ) : viewer.data.hasFile ? (
+                    <a className="link-btn" href={`/api/profiles/${viewer.pid}/sources/${viewer.data.id}/raw`} target="_blank" rel="noreferrer">
+                      원본 파일 열기 ↗
+                    </a>
+                  ) : null}
+                  {viewer.data.contentSource === "normalized" && <span className="optional">구조화(전처리)된 마크다운 기준</span>}
+                  {viewer.data.contentSource === "chunks" && <span className="optional">임베딩 시 추출된 내용 기준</span>}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* "내 PC에 설치" — complete local package guide (LM Studio + ARK) */}
       {installOpen && (
         <div className="modal-overlay" onClick={() => setInstallOpen(false)}>
@@ -2304,59 +2358,36 @@ function App() {
 
             <div className="settings-section">
               <p className="skill-group-label">
-                회사 API Key 없이, <strong>내 컴퓨터에서 전부 도는</strong> 구성입니다. 아래 3단계면 끝나요.
-                데이터·대화가 PC 밖으로 나가지 않습니다.
+                회사 API Key 없이 <strong>내 컴퓨터에서 전부 도는</strong> 프로그램입니다. 두 가지만 하면 됩니다.
               </p>
-            </div>
-
-            <div className="settings-section install-step">
-              <h3><span className="step-no">1</span> LM Studio 설치 (무료 · AI 엔진)</h3>
-              <p className="skill-group-label">모델을 실행해 주는 프로그램입니다. 설치 후 앱 안에서:</p>
-              <ul className="install-list">
-                <li>🔍 검색에서 <b>채팅 모델</b>(추천 <code>qwen2.5-7b-instruct</code>)과 <b>임베딩 모델</b>(추천 <code>bge-m3</code>) 다운로드</li>
-                <li>두 모델을 로드하고 <b>Local Server → Start</b> (초록불 · 포트 1234)</li>
-              </ul>
-              <div className="install-actions">
-                <a className="link-btn" href="https://lmstudio.ai" target="_blank" rel="noreferrer">LM Studio 다운로드 ↗</a>
-              </div>
-            </div>
-
-            <div className="settings-section install-step">
-              <h3><span className="step-no">2</span> ARK 다운로드</h3>
-              <div className="install-actions">
-                <a className="link-btn" href="https://github.com/waneekim/local_mini_rag/archive/refs/heads/main.zip" target="_blank" rel="noreferrer">
-                  ZIP 다운로드 ↗
+              <div className="install-big">
+                <a className="link-btn big" href="https://github.com/waneekim/local_mini_rag/archive/refs/heads/main.zip" target="_blank" rel="noreferrer">
+                  <Download size={17} /> ARK 다운로드 (ZIP)
                 </a>
-                <button type="button" className="secondary mini-btn" onClick={() => copyText("git clone https://github.com/waneekim/local_mini_rag.git")}>
-                  git 명령 복사
-                </button>
+                <a className="link-btn big secondary-link" href="https://lmstudio.ai" target="_blank" rel="noreferrer">
+                  LM Studio 다운로드 ↗
+                </a>
               </div>
-              <p className="skill-group-label">ZIP은 압축을 풀어 원하는 폴더에 두면 됩니다.</p>
-            </div>
-
-            <div className="settings-section install-step">
-              <h3><span className="step-no">3</span> 더블클릭 설치 · 실행 (트레이 앱)</h3>
-              <p className="skill-group-label">
-                푼 폴더 안 <b>scripts</b>에서 내 운영체제 파일을 <b>더블클릭</b>하면 — 설치 → 로컬 설정 생성 →
-                <b> 데스크톱 앱(트레이 상주)</b> 실행까지 자동으로 진행됩니다. 브라우저가 필요 없어요.
-              </p>
-              <ul className="install-list">
-                <li>macOS: <code>scripts/setup-mac.command</code> · Windows: <code>scripts/setup-windows.bat</code></li>
-                <li>Node.js가 없으면 설치 페이지가 자동으로 열립니다 (LTS 설치 후 다시 더블클릭)</li>
-              </ul>
-              <p className="skill-group-label">
-                실행 후: <b>Ctrl+Shift+Space</b>(mac은 Cmd)로 언제든 채팅창 열기/숨기기 · 창을 닫아도
-                트레이에 남아 계속 동작 · <b>파일/폴더를 창에 드래그앤드롭</b>하면 바로 지식으로 추가됩니다.
-                LM Studio가 켜져 있으면 <b>API Key 없이</b> ⚙️ 빠른 연결에서 [연결하기]만 누르면 끝.
-              </p>
-            </div>
-
-            <div className="settings-section">
+              <ol className="install-list big">
+                <li><b>LM Studio</b> 설치 → 앱에서 모델 받고 <b>Local Server Start</b></li>
+                <li><b>ARK ZIP</b> 압축 풀고 → <code>scripts</code> 폴더의 설치 파일 <b>더블클릭</b> (끝)</li>
+              </ol>
               <p className="skill-group-label optional">
-                문제가 생기면: LM Studio Local Server가 켜져 있는지(포트 1234), 모델 이름이 .env의
-                <code> LLM_MODEL</code>/<code>EMBEDDINGS_MODEL</code>과 같은지 확인하세요. 자세한 내용은 README 참고.
+                설치가 끝나면 트레이 앱이 실행됩니다 — <b>Ctrl+Shift+Space</b>로 채팅창을 열고,
+                파일을 끌어다 놓고 바로 대화하세요.
               </p>
             </div>
+
+            <details className="settings-section install-details">
+              <summary>자세한 안내가 필요하면 (모델 추천 · 문제 해결)</summary>
+              <ul className="install-list">
+                <li>LM Studio 모델: 채팅 <code>qwen2.5-7b-instruct</code> · 임베딩 <code>bge-m3</code> 추천 (둘 다 로드 후 Server Start)</li>
+                <li>설치 파일: macOS <code>scripts/setup-mac.command</code> · Windows <code>scripts/setup-windows.bat</code></li>
+                <li>Node.js가 없으면 설치 페이지가 자동으로 열립니다 — LTS 설치 후 다시 더블클릭</li>
+                <li>git이 편하면: <button type="button" className="secondary mini-btn" onClick={() => copyText("git clone https://github.com/waneekim/local_mini_rag.git")}>git clone 명령 복사</button></li>
+                <li>연결이 안 되면: LM Studio Local Server(포트 1234)가 켜져 있는지, ⚙️ 빠른 연결에서 [연결하기]로 상태를 확인하세요</li>
+              </ul>
+            </details>
           </div>
         </div>
       )}
@@ -2691,10 +2722,17 @@ function App() {
             <p className="brand-full">Agent RAG Knowledge</p>
             <p className="brand-model">{health?.llmProvider?.model || health?.llmProvider?.provider || "checking"}</p>
           </div>
-          <button className="icon-button" type="button" title="내 PC에 설치 (완전 로컬 패키지)" onClick={() => setInstallOpen(true)} style={{ marginLeft: "auto" }}>
-            <Download size={18} />
-          </button>
-          <button className="icon-button" type="button" title="설정" onClick={openSettings}>
+          {/* Minimal background-work signal: a pulsing dot, details on hover only. */}
+          {(busy || (job && !["completed", "completed_with_errors", "failed"].includes(job.status))) && (
+            <span className="working-dot" title={status || "작업 진행 중"} aria-label="작업 진행 중" style={{ marginLeft: "auto" }} />
+          )}
+          <button
+            className="icon-button"
+            type="button"
+            title="설정"
+            onClick={openSettings}
+            style={busy || (job && !["completed", "completed_with_errors", "failed"].includes(job.status)) ? undefined : { marginLeft: "auto" }}
+          >
             <Settings size={18} />
           </button>
         </div>
@@ -2702,6 +2740,25 @@ function App() {
         <div className="agent-toolbar">
           <span className="agent-toolbar-label">Agents</span>
           <button className="icon-button" type="button" title="Agent 추가" onClick={createProfile}><Plus size={18} /></button>
+        </div>
+
+        {/* Source-add tools: they act on the selected Agent's knowledge, so they
+            live next to the sources — not under the chat prompt. */}
+        <div className="source-tools">
+          <button className="tool" type="button" title="파일 추가" onClick={() => pickFiles(activeProfileId)}><Upload size={15} /></button>
+          <button className="tool" type="button" title="폴더 추가" onClick={() => pickFolder(activeProfileId)}><FolderUp size={15} /></button>
+          <button className="tool" type="button" title="텍스트 추가" onClick={() => openTextDialog(activeProfileId)}><FileText size={15} /></button>
+          <button className="tool" type="button" title="URL 추가" onClick={() => openUrlDialog(activeProfileId)}><Link size={15} /></button>
+          <span className="tool-sep" />
+          <button className={`tool toggle ${autoIndex ? "on" : ""}`} type="button" title={`추가 시 자동 임베딩: ${autoIndex ? "켜짐" : "꺼짐"}`} onClick={() => toggleAutoIndex()}>
+            <Zap size={15} />
+          </button>
+          <button className={`tool toggle ${autoApprove ? "on" : ""}`} type="button" title={`전처리 자동 승인(검토 없이 바로 색인): ${autoApprove ? "켜짐" : "꺼짐"}`} onClick={() => toggleAutoApprove()}>
+            <Sparkles size={15} />
+          </button>
+          <button className={`tool toggle ${folderTree ? "on" : ""}`} type="button" title={`폴더 추가 시 폴더 구조를 소스로 색인: ${folderTree ? "켜짐" : "꺼짐"}`} onClick={() => toggleFolderTree()}>
+            <FolderTree size={15} />
+          </button>
         </div>
 
         <div className="agent-search">
@@ -2805,6 +2862,12 @@ function App() {
             });
           })()}
         </section>
+
+        <div className="sidebar-footer">
+          <button type="button" className="footer-link" onClick={() => setInstallOpen(true)}>
+            <Download size={14} /> 내 PC에 설치
+          </button>
+        </div>
       </aside>
 
       <div
@@ -3004,38 +3067,11 @@ function App() {
                 </div>
                 <div className="composer-bar">
                   <div className="input-tools">
-                    <button className="tool" type="button" title="파일 추가" onClick={() => pickFiles(activeProfileId)}><Upload size={16} /></button>
-                    <button className="tool" type="button" title="폴더 추가" onClick={() => pickFolder(activeProfileId)}><FolderUp size={16} /></button>
-                    <button className="tool" type="button" title="텍스트 추가" onClick={() => openTextDialog(activeProfileId)}><FileText size={16} /></button>
-                    <button className="tool" type="button" title="URL 추가" onClick={() => openUrlDialog(activeProfileId)}><Link size={16} /></button>
+                    {/* Chat-only tool: attach an image to the prompt. Source-add
+                        tools live in the left panel next to the sources. */}
                     <button className="tool" type="button" title="이미지 첨부 · 클릭=화면 공유 후 영역선택 / 또는 스크린샷 복사 후 ⌘V 붙여넣기 → 프롬프트와 함께 비전 모델로 전송" onClick={captureScreenshot}><Camera size={16} /></button>
-                    <span className="tool-sep" />
-                    <button
-                      className={`tool toggle ${autoIndex ? "on" : ""}`}
-                      type="button"
-                      title={`추가 시 자동 임베딩: ${autoIndex ? "켜짐" : "꺼짐"}`}
-                      onClick={() => toggleAutoIndex()}
-                    >
-                      <Zap size={16} />
-                    </button>
-                    <button
-                      className={`tool toggle ${autoApprove ? "on" : ""}`}
-                      type="button"
-                      title={`전처리 자동 승인(검토 없이 바로 색인): ${autoApprove ? "켜짐" : "꺼짐"}`}
-                      onClick={() => toggleAutoApprove()}
-                    >
-                      <Sparkles size={16} />
-                    </button>
-                    <button
-                      className={`tool toggle ${folderTree ? "on" : ""}`}
-                      type="button"
-                      title={`폴더 추가 시 폴더 구조를 소스로 색인: ${folderTree ? "켜짐" : "꺼짐"}`}
-                      onClick={() => toggleFolderTree()}
-                    >
-                      <FolderTree size={16} />
-                    </button>
                   </div>
-                  <button type="button" onClick={runChat} disabled={busy || !query.trim()} aria-label="전송" className="send-btn">
+                  <button type="button" onClick={runChat} disabled={busy || (!query.trim() && !attachments.length)} aria-label="전송" className="send-btn">
                     <Send size={18} />
                   </button>
                 </div>

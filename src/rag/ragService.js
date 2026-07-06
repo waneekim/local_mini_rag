@@ -1391,6 +1391,40 @@ class RagService {
     throw Object.assign(new Error("열 수 있는 원본이 없습니다."), { statusCode: 404 });
   }
 
+  // Readable content of a source for the double-click viewer: the reviewed
+  // Markdown if present, else the indexed chunk text (covers xlsx/docx/pdf —
+  // whatever the extractor produced), else the pasted text. Users see "what
+  // this document actually says" without opening the original app.
+  getSourceContent(profileId, sourceId) {
+    this.ensureProfile(profileId);
+    const source = one(this.db, "SELECT * FROM sources WHERE id = ? AND profile_id = ?", sourceId, profileId);
+    if (!source) throw Object.assign(new Error("Source not found"), { statusCode: 404 });
+    let content = String(source.normalized_md || "").trim();
+    let contentSource = content ? "normalized" : "";
+    if (!content) {
+      const chunks = all(this.db, "SELECT text FROM chunks WHERE source_id = ? ORDER BY chunk_index ASC", sourceId);
+      if (chunks.length) {
+        content = chunks.map((c) => c.text).join("\n\n");
+        contentSource = "chunks";
+      }
+    }
+    if (!content && source.pasted_text) {
+      content = source.pasted_text;
+      contentSource = "pasted";
+    }
+    return {
+      id: source.id,
+      title: source.title,
+      kind: source.kind,
+      relativePath: source.relative_path || "",
+      status: source.status,
+      content,
+      contentSource: contentSource || "none",
+      hasFile: Boolean(source.file_path && existsSync(source.file_path)),
+      url: source.kind === "url" ? safeJson(source.metadata_json)?.url || "" : ""
+    };
+  }
+
   // Save a human-reviewed edit of a source's structured Markdown. Clearing it
   // (empty string) reverts the source to raw-extraction indexing.
   updateNormalized(profileId, sourceId, markdown) {
