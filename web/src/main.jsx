@@ -20,6 +20,7 @@ import {
   Maximize2,
   MessageSquare,
   Minimize2,
+  Network,
   Pencil,
   Plus,
   RefreshCw,
@@ -177,6 +178,11 @@ function App() {
   const [rules, setRules] = useState([]);
   // Preprocessing agent: review/edit a source's structured Markdown before indexing.
   const [structureModal, setStructureModal] = useState(null); // { pid, source, md, busy }
+  // Semantic concepts (의미·맥락 레이어).
+  const [conceptModal, setConceptModal] = useState(null); // { profileId }
+  const [concepts, setConcepts] = useState([]);
+  const [conceptBusy, setConceptBusy] = useState(false);
+  const [conceptForm, setConceptForm] = useState({ name: "", aliases: "", definition: "" });
   // UX glossary (word dictionary) + integrated sentence review.
   const [glossaryModal, setGlossaryModal] = useState(null); // { profileId }
   const [glossaryTerms, setGlossaryTerms] = useState([]);
@@ -537,6 +543,68 @@ function App() {
       setLintResult(await fetchJson(`/api/profiles/${pid}/lint`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: lintInput }) }));
     } catch (error) {
       setStatus(`검사 실패: ${error.message}`);
+    }
+  }
+
+  // ── Semantic concepts (의미·맥락 레이어) ──
+
+  async function openConcepts(pid) {
+    setConceptModal({ profileId: pid });
+    setConceptForm({ name: "", aliases: "", definition: "" });
+    setConcepts([]);
+    try {
+      setConcepts(await fetchJson(`/api/profiles/${pid}/concepts`));
+    } catch (error) {
+      setStatus(`개념 로드 실패: ${error.message}`);
+    }
+  }
+
+  async function addConcept() {
+    const pid = conceptModal?.profileId;
+    if (!pid || !conceptForm.name.trim()) return;
+    try {
+      await fetchJson(`/api/profiles/${pid}/concepts`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(conceptForm)
+      });
+      setConcepts(await fetchJson(`/api/profiles/${pid}/concepts`));
+      setConceptForm({ name: "", aliases: "", definition: "" });
+      setStatus("개념 저장됨 — 소스 연결까지 자동 갱신");
+    } catch (error) {
+      setStatus(`개념 저장 실패: ${error.message}`);
+    }
+  }
+
+  async function patchConcept(conceptId, patch) {
+    const pid = conceptModal?.profileId;
+    const updated = await fetchJson(`/api/profiles/${pid}/concepts/${conceptId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch)
+    });
+    setConcepts((prev) => prev.map((c) => (c.id === conceptId ? updated : c)));
+  }
+
+  async function deleteConcept(conceptId) {
+    const pid = conceptModal?.profileId;
+    await fetchJson(`/api/profiles/${pid}/concepts/${conceptId}`, { method: "DELETE" });
+    setConcepts((prev) => prev.filter((c) => c.id !== conceptId));
+  }
+
+  async function extractConcepts() {
+    const pid = conceptModal?.profileId;
+    if (!pid) return;
+    setConceptBusy(true);
+    setStatus("소스에서 개념(동의어·변형 표기) 추출 중… (문서가 길면 걸립니다)");
+    try {
+      const r = await fetchJson(`/api/profiles/${pid}/concepts/extract`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      setConcepts(await fetchJson(`/api/profiles/${pid}/concepts`));
+      setStatus(`개념 ${r.created}개 초안 생성됨 — 검토 후 확정하세요`);
+    } catch (error) {
+      setStatus(`개념 추출 실패: ${error.message}`);
+    } finally {
+      setConceptBusy(false);
     }
   }
 
@@ -1346,6 +1414,7 @@ function App() {
           content: payload.answer,
           citations: cites,
           panelCitations: panelCites,
+          concepts: payload.concepts || [],
           violations: payload.violations || [],
           profileId: targetId,
           query: text,
@@ -1800,6 +1869,7 @@ function App() {
               <button onClick={() => { openUrlDialog(menu.pid); setMenu(null); }}><Link size={14} />URL 추가</button>
               <button onClick={() => { openRules(menu.pid); setMenu(null); }}><ClipboardCheck size={14} />규칙(가이드)</button>
               <button onClick={() => { openGlossary(menu.pid); setMenu(null); }}><BookOpen size={14} />용어집(단어 검수)</button>
+              <button onClick={() => { openConcepts(menu.pid); setMenu(null); }}><Network size={14} />의미 사전(동의어·맥락)</button>
               <button onClick={() => { openFeedback(menu.pid); setMenu(null); }}><ThumbsUp size={14} />피드백 학습</button>
             </>
           ) : (
@@ -1841,6 +1911,64 @@ function App() {
                   {structureModal.busy ? "저장 중…" : "저장"}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Semantic concepts (의미·맥락 레이어) modal */}
+      {conceptModal && (
+        <div className="modal-overlay" onClick={() => setConceptModal(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>의미 사전 — {profiles.find((p) => p.id === conceptModal.profileId)?.name || "Agent"}</h2>
+              <button className="icon-button" type="button" onClick={() => setConceptModal(null)}><X size={18} /></button>
+            </div>
+
+            <div className="settings-section">
+              <p className="skill-group-label">
+                같은 의미가 여러 표기로 쓰일 때(<b>동작 대기 = 대기 중 = 스탠바이</b>) 하나의 <strong>개념</strong>으로
+                묶습니다. 질문이 어느 표기로 들어와도 개념으로 해석해 <strong>원본 소스까지 연결</strong>되고,
+                답변 LLM에도 해석이 전달됩니다.
+              </p>
+              <button type="button" className="secondary" onClick={extractConcepts} disabled={conceptBusy}>
+                <Sparkles size={15} />{conceptBusy ? "추출 중…" : "소스에서 개념 추출 (초안)"}
+              </button>
+            </div>
+
+            <div className="settings-section">
+              <p className="skill-group-label">개념 {concepts.length}개 <span className="optional">(확정 {concepts.filter((c) => c.reviewStatus === "confirmed").length} · 확정된 개념만 검색에 사용)</span></p>
+              <div className="skill-repo-row term-add">
+                <input value={conceptForm.name} onChange={(e) => setConceptForm((f) => ({ ...f, name: e.target.value }))} placeholder="대표 이름 (예: 동작 대기)" />
+                <input value={conceptForm.aliases} onChange={(e) => setConceptForm((f) => ({ ...f, aliases: e.target.value }))} placeholder="변형 표기 (쉼표: 대기 중, 스탠바이)" />
+                <button type="button" className="secondary" onClick={addConcept} disabled={!conceptForm.name.trim()}><Plus size={14} /></button>
+              </div>
+              <input
+                value={conceptForm.definition}
+                onChange={(e) => setConceptForm((f) => ({ ...f, definition: e.target.value }))}
+                placeholder="뜻/맥락 한 줄 (선택)"
+                style={{ marginTop: 6 }}
+              />
+              {concepts.length ? concepts.map((c) => (
+                <div key={c.id} className={`rule-row ${c.reviewStatus === "confirmed" ? "approved" : "draft"}`}>
+                  <div className="rule-main">
+                    <div className="rule-head">
+                      <strong>{c.name}</strong>
+                      {c.aliases?.length ? <span className="optional">= {c.aliases.join(" · ")}</span> : null}
+                      {c.reviewStatus !== "confirmed" && <span className="rule-badge draft">초안</span>}
+                    </div>
+                    {c.definition ? <p className="term-def">{c.definition}</p> : null}
+                  </div>
+                  <div className="rule-actions">
+                    {c.reviewStatus !== "confirmed" && (
+                      <button type="button" className="mini" title="확정 (검색에 반영)" onClick={() => patchConcept(c.id, { reviewStatus: "confirmed" })}>✓</button>
+                    )}
+                    <button type="button" className="mini danger" title="삭제" onClick={() => deleteConcept(c.id)}><Trash2 size={12} /></button>
+                  </div>
+                </div>
+              )) : (
+                <p className="empty tiny">아직 개념이 없습니다. 직접 추가하거나 소스에서 추출하세요.</p>
+              )}
             </div>
           </div>
         </div>
@@ -2678,6 +2806,11 @@ function App() {
                           {msg.role === "assistant" ? renderAnswerText(msg.content, msg.citations, openCitationPopup) : msg.content}
                         </p>
                       )}
+                      {msg.role === "assistant" && msg.concepts?.length ? (
+                        <div className="msg-concepts">
+                          🧭 해석: {msg.concepts.map((c) => `${(c.surfaces || []).join("/") || c.name} → ${c.name}`).join(" · ")}
+                        </div>
+                      ) : null}
                       {msg.role === "assistant" && msg.violations?.length ? (
                         <div className="msg-violations">
                           {msg.violations.map((v, i) => (

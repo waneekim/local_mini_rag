@@ -23,6 +23,14 @@ import {
   normalizeTermKey,
   parseGlossaryRecords
 } from "./glossary.js";
+import {
+  CONCEPT_EXTRACTION_SYSTEM,
+  buildConceptBlock,
+  expandQuery,
+  matchConcepts,
+  normalizeConceptInput,
+  parseConceptRecords
+} from "./concepts.js";
 
 const DEFAULT_TOP_K = 8;
 
@@ -552,6 +560,128 @@ class RagService {
       }
     }
     return { created: created.length, terms: created };
+  }
+
+  // --- Semantic concepts (의미·맥락 레이어) ---------------------------------
+  // Canonical meaning + variant surface forms, linked to the chunks that
+  // mention them. Retrieval interprets the query at the concept level first,
+  // then reaches the original source through the links.
+
+  listConcepts(profileId, { reviewStatus } = {}) {
+    this.ensureProfile(profileId);
+    const rows = reviewStatus
+      ? all(this.db, "SELECT * FROM concepts WHERE profile_id = ? AND review_status = ? ORDER BY name ASC", profileId, reviewStatus)
+      : all(this.db, "SELECT * FROM concepts WHERE profile_id = ? ORDER BY name ASC", profileId);
+    return rows.map(hydrateConcept);
+  }
+
+  upsertConcept(profileId, input = {}) {
+    this.ensureProfile(profileId);
+    const at = nowIso();
+    const existing = input.id
+      ? one(this.db, "SELECT * FROM concepts WHERE id = ? AND profile_id = ?", input.id, profileId)
+      : null;
+    const base = existing ? hydrateConcept(existing) : {};
+    const fields = normalizeConceptInput({
+      name: input.name ?? base.name,
+      aliases: input.aliases ?? base.aliases,
+      definition: input.definition ?? base.definition
+    });
+    if (!fields.name) throw Object.assign(new Error("name is required"), { statusCode: 400 });
+    const reviewStatus =
+      input.reviewStatus === "draft" || input.reviewStatus === "confirmed"
+        ? input.reviewStatus
+        : existing?.review_status || "confirmed";
+    const normKey = normalizeTermKey(fields.name);
+
+    let conceptId = existing?.id;
+    if (existing) {
+      run(
+        this.db,
+        "UPDATE concepts SET name = ?, norm_key = ?, aliases_json = ?, definition = ?, review_status = ?, updated_at = ? WHERE id = ? AND profile_id = ?",
+        fields.name, normKey, JSON.stringify(fields.aliases), fields.definition, reviewStatus, at, existing.id, profileId
+      );
+    } else {
+      // Same normalized name collapses onto the existing concept (merge aliases).
+      const dup = one(this.db, "SELECT * FROM concepts WHERE profile_id = ? AND norm_key = ?", profileId, normKey);
+      if (dup) {
+        const merged = [...new Set([...hydrateConcept(dup).aliases, ...fields.aliases])];
+        return this.upsertConcept(profileId, { ...input, id: dup.id, aliases: merged });
+      }
+      conceptId = id("concept");
+      run(
+        this.db,
+        `INSERT INTO concepts (id, profile_id, name, norm_key, aliases_json, definition, source_id, review_status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        conceptId, profileId, fields.name, normKey, JSON.stringify(fields.aliases), fields.definition,
+        String(input.sourceId || ""), reviewStatus, at, at
+      );
+    }
+    // Keep the chunk links in sync whenever a confirmed concept changes.
+    if (reviewStatus === "confirmed") this.retagConcepts(profileId);
+    return hydrateConcept(one(this.db, "SELECT * FROM concepts WHERE id = ?", conceptId));
+  }
+
+  deleteConcept(profileId, conceptId) {
+    this.ensureProfile(profileId);
+    run(this.db, "DELETE FROM concepts WHERE id = ? AND profile_id = ?", conceptId, profileId);
+    return { ok: true };
+  }
+
+  // LLM-assisted extraction: find concepts (one meaning, many surface forms)
+  // in the indexed sources, stored as drafts for review.
+  async extractConcepts(profileId, input = {}) {
+    this.ensureProfile(profileId);
+    const sourceIds = Array.isArray(input.sourceIds) && input.sourceIds.length
+      ? input.sourceIds
+      : all(this.db, "SELECT id FROM sources WHERE profile_id = ?", profileId).map((r) => r.id);
+    if (typeof this.llm.complete !== "function") {
+      throw Object.assign(new Error("현재 LLM 설정으로는 개념 추출을 할 수 없습니다."), { statusCode: 400 });
+    }
+    const windows = [];
+    for (const sourceId of sourceIds) {
+      const text = this._sourceText(sourceId);
+      for (let i = 0; i < text.length && windows.length < 16; i += 3500) {
+        const slice = text.slice(i, i + 3500).trim();
+        if (slice) windows.push({ sourceId, text: slice });
+      }
+    }
+    const created = [];
+    for (const window of windows) {
+      let out = "";
+      try {
+        out = await this.llm.complete({ system: CONCEPT_EXTRACTION_SYSTEM, user: window.text });
+      } catch (error) {
+        this.logger?.warn?.(`concept extraction failed: ${error.message}`);
+        continue;
+      }
+      for (const record of parseConceptRecords(out)) {
+        created.push(this.upsertConcept(profileId, { ...record, sourceId: window.sourceId, reviewStatus: "draft" }));
+      }
+    }
+    return { created: created.length, concepts: created };
+  }
+
+  // Re-link every chunk in the profile to the confirmed concepts it mentions
+  // (deterministic longest-match scan — no LLM). Called after concept changes
+  // and after indexing, so the meaning layer always points at current sources.
+  retagConcepts(profileId) {
+    const concepts = this.listConcepts(profileId, { reviewStatus: "confirmed" });
+    run(this.db, "DELETE FROM chunk_concepts WHERE profile_id = ?", profileId);
+    if (!concepts.length) return { tagged: 0, concepts: 0 };
+    const chunks = all(this.db, "SELECT id, text FROM chunks WHERE profile_id = ?", profileId);
+    let tagged = 0;
+    for (const chunk of chunks) {
+      for (const { concept } of matchConcepts(chunk.text, concepts)) {
+        run(
+          this.db,
+          "INSERT OR IGNORE INTO chunk_concepts (chunk_id, concept_id, profile_id) VALUES (?, ?, ?)",
+          chunk.id, concept.id, profileId
+        );
+        tagged += 1;
+      }
+    }
+    return { tagged, concepts: concepts.length };
   }
 
   // Integrated review: glossary word check + rule lint + style-guide retrieval,
@@ -1283,12 +1413,16 @@ class RagService {
 
     const at = nowIso();
     const folderPath = folderPathOf(source.relative_path);
+    // Confirmed concepts get linked to each new chunk they appear in, so the
+    // meaning layer always points at the current source text.
+    const confirmedConcepts = this.listConcepts(source.profile_id, { reviewStatus: "confirmed" });
     chunks.forEach((chunk, index) => {
+      const chunkId = id("chunk");
       run(
         this.db,
         `INSERT INTO chunks (id, profile_id, source_id, chunk_index, text, locator_json, embedding_json, folder_path, heading_path, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        id("chunk"),
+        chunkId,
         source.profile_id,
         source.id,
         index,
@@ -1299,6 +1433,13 @@ class RagService {
         typeof chunk.locator?.heading === "string" ? chunk.locator.heading : "",
         at
       );
+      for (const { concept } of matchConcepts(chunk.text, confirmedConcepts)) {
+        run(
+          this.db,
+          "INSERT OR IGNORE INTO chunk_concepts (chunk_id, concept_id, profile_id) VALUES (?, ?, ?)",
+          chunkId, concept.id, source.profile_id
+        );
+      }
     });
 
     run(
@@ -1336,8 +1477,30 @@ class RagService {
     // Relevance floor: below this combined score a hit is treated as noise and
     // dropped, so the LLM gets "no context" instead of unrelated chunks. 0 = off.
     const minScore = Number(input.minScore ?? process.env.RAG_MIN_SCORE ?? 0);
+
+    // Meaning layer: interpret the query at the concept level, then (a) expand
+    // the retrieval text with every variant surface form and (b) collect the
+    // chunks linked to those concepts for a deterministic boost. This is what
+    // lets "대기 중" reach a chunk that says "스탠바이".
+    const confirmedConcepts = this.listConcepts(profileId, { reviewStatus: "confirmed" });
+    const matchedConcepts = matchConcepts(query, confirmedConcepts);
+    const retrievalQuery = expandQuery(query, matchedConcepts);
+    const linkedCount = new Map();
+    if (matchedConcepts.length) {
+      const ids = matchedConcepts.map(({ concept }) => concept.id);
+      const rows = all(
+        this.db,
+        `SELECT chunk_id, COUNT(*) AS n FROM chunk_concepts
+         WHERE profile_id = ? AND concept_id IN (${ids.map(() => "?").join(",")})
+         GROUP BY chunk_id`,
+        profileId,
+        ...ids
+      );
+      for (const row of rows) linkedCount.set(row.chunk_id, row.n);
+    }
+
     const tEmbed = performance.now();
-    const [queryVector] = await this.embeddings.embed([query], { mode: "query" });
+    const [queryVector] = await this.embeddings.embed([retrievalQuery], { mode: "query" });
     const embedMs = performance.now() - tEmbed;
     const tScore = performance.now();
     const chunks = all(
@@ -1356,13 +1519,17 @@ class RagService {
       .map((chunk) => {
         const vector = JSON.parse(chunk.embedding_json);
         const vectorScore = cosineSimilarity(queryVector, vector);
-        const keywordScore = lexicalScore(query, chunk.text);
+        // Lexical match against the concept-expanded query, so variant surface
+        // forms in the chunk still count as keyword hits.
+        const keywordScore = lexicalScore(retrievalQuery, chunk.text);
         // Path boost: reward chunks whose folder/heading names echo the query,
         // so a well-categorised tree nudges the right section up. Empty paths
         // (plain text sources) contribute nothing, keeping legacy behaviour.
         const pathText = `${(chunk.folder_path || "").replace(/\//g, " ")} ${(chunk.heading_path || "").replace(/>/g, " ")}`.trim();
         const pathScore = pathText ? lexicalScore(query, pathText) : 0;
-        const combined = vectorScore * 0.8 + keywordScore * 0.2 + pathScore * 0.15;
+        // Concept boost: chunks linked to the concepts the query mentions.
+        const conceptScore = matchedConcepts.length ? (linkedCount.get(chunk.id) || 0) / matchedConcepts.length : 0;
+        const combined = vectorScore * 0.8 + keywordScore * 0.2 + pathScore * 0.15 + conceptScore * 0.25;
         return {
           id: chunk.id,
           sourceId: chunk.source_id,
@@ -1378,7 +1545,8 @@ class RagService {
           score: Number(combined.toFixed(6)),
           vectorScore: Number(vectorScore.toFixed(6)),
           keywordScore: Number(keywordScore.toFixed(6)),
-          pathScore: Number(pathScore.toFixed(6))
+          pathScore: Number(pathScore.toFixed(6)),
+          conceptScore: Number(conceptScore.toFixed(6))
         };
       })
       .filter((hit) => hit.score > 0 && hit.score >= minScore)
@@ -1402,6 +1570,15 @@ class RagService {
       query,
       scope: scope || "",
       topK,
+      // Concept interpretation of the query (meaning layer), for the UI and
+      // for the chat pass to inject as context.
+      concepts: matchedConcepts.map(({ concept, surfaces }) => ({
+        id: concept.id,
+        name: concept.name,
+        surfaces,
+        aliases: concept.aliases,
+        definition: concept.definition
+      })),
       reranked: rr.reranked,
       timings,
       hits: diversify(rr.hits, topK)
@@ -1470,6 +1647,7 @@ class RagService {
       contextText,
       hits: search.hits,
       citations,
+      concepts: search.concepts || [],
       timings: search.timings,
       sourceVersion: sourceVersion(this.db, profileId)
     };
@@ -1503,6 +1681,15 @@ class RagService {
         const block = buildRuleBlock(violations, rules);
         if (block) envelope.contextText = `${block}\n\n${envelope.contextText}`;
       }
+    }
+
+    // Meaning layer: tell the LLM what the user's words mean and which document
+    // phrasings refer to the same concept, so it answers by meaning, not tokens.
+    if (envelope.concepts?.length) {
+      const block = buildConceptBlock(
+        envelope.concepts.map((c) => ({ concept: c, surfaces: c.surfaces || [] }))
+      );
+      if (block) envelope.contextText = `${block}\n\n${envelope.contextText}`;
     }
 
     // Self-improving memory: prepend guidance recalled from similar past feedback.
@@ -1539,6 +1726,7 @@ class RagService {
       query,
       answer: result.answer,
       citations: envelope.citations,
+      concepts: envelope.concepts || [],
       violations,
       usedFeedback: memory.used,
       timings,
@@ -1558,6 +1746,28 @@ const REVIEW_SYSTEM =
   "1) 교정문: 한 줄로 완성된 최종 문장.\n" +
   "2) 이유: 적용한 가이드/용어 교체를 짧게 항목별로 (근거 번호 [n] 인용).\n" +
   "규칙: 비권장/금지 단어는 반드시 권장어로 교체하고, 미등록 후보는 승인어로 바꾸거나 등록 검토를 제안한다. 의미를 바꾸지 말고 창작하지 마라.";
+
+function hydrateConcept(row) {
+  if (!row) return null;
+  let aliases = [];
+  try {
+    const parsed = JSON.parse(row.aliases_json || "[]");
+    if (Array.isArray(parsed)) aliases = parsed;
+  } catch {
+    aliases = [];
+  }
+  return {
+    id: row.id,
+    profileId: row.profile_id,
+    name: row.name,
+    aliases,
+    definition: row.definition,
+    sourceId: row.source_id,
+    reviewStatus: row.review_status,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
 
 function hydrateGlossaryTerm(row) {
   if (!row) return null;

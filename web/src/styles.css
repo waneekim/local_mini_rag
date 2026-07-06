@@ -1125,6 +1125,12 @@ input:focus, select:focus, textarea:focus {
 .lint-hits { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
 .lint-hit { padding: 8px 10px; border-radius: 8px; background: rgba(210, 153, 34, 0.14); font-size: 0.84rem; }
 .lint-rule { margin-top: 3px; opacity: 0.75; font-size: 0.78rem; }
+/* Concept interpretation line under an assistant answer */
+.msg-concepts {
+  margin-top: 7px; padding: 6px 10px; border-radius: 8px; font-size: 0.76rem;
+  background: rgba(88, 136, 255, 0.1); color: var(--muted, #9aa); line-height: 1.5;
+}
+
 /* ── "내 PC에 설치" local-package guide ── */
 .install-step h3 { display: flex; align-items: center; gap: 8px; }
 .step-no {

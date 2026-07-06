@@ -107,6 +107,32 @@ export function createDatabase(dbPath) {
     );
     CREATE INDEX IF NOT EXISTS idx_glossary_profile_key ON glossary_terms(profile_id, norm_key);
 
+    -- Semantic middle layer: canonical concepts with their variant surface
+    -- forms ("동작 대기" ↔ "대기 중"/"스탠바이") plus a short definition. Chunks
+    -- are linked to the concepts they mention, so a query phrased one way can
+    -- reach source text phrased another way — meaning first, then the source.
+    CREATE TABLE IF NOT EXISTS concepts (
+      id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      norm_key TEXT NOT NULL,
+      aliases_json TEXT NOT NULL DEFAULT '[]',
+      definition TEXT NOT NULL DEFAULT '',
+      source_id TEXT NOT NULL DEFAULT '',
+      review_status TEXT NOT NULL DEFAULT 'confirmed',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_concepts_profile ON concepts(profile_id, norm_key);
+
+    CREATE TABLE IF NOT EXISTS chunk_concepts (
+      chunk_id TEXT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+      concept_id TEXT NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+      profile_id TEXT NOT NULL,
+      PRIMARY KEY (chunk_id, concept_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunk_concepts ON chunk_concepts(profile_id, concept_id);
+
     CREATE TABLE IF NOT EXISTS feedback (
       id TEXT PRIMARY KEY,
       profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
