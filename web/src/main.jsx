@@ -183,6 +183,8 @@ function App() {
   const [concepts, setConcepts] = useState([]);
   const [conceptBusy, setConceptBusy] = useState(false);
   const [conceptForm, setConceptForm] = useState({ name: "", aliases: "", definition: "" });
+  // Skip the draft-review stop: extracted concepts are confirmed immediately.
+  const [autoConfirmConcepts, setAutoConfirmConcepts] = useState(() => localStorage.getItem("rag.autoConfirmConcepts") === "1");
   // UX glossary (word dictionary) + integrated sentence review.
   const [glossaryModal, setGlossaryModal] = useState(null); // { profileId }
   const [glossaryTerms, setGlossaryTerms] = useState([]);
@@ -592,15 +594,29 @@ function App() {
     setConcepts((prev) => prev.filter((c) => c.id !== conceptId));
   }
 
+  function toggleAutoConfirmConcepts(value) {
+    const next = typeof value === "boolean" ? value : !autoConfirmConcepts;
+    setAutoConfirmConcepts(next);
+    localStorage.setItem("rag.autoConfirmConcepts", next ? "1" : "0");
+  }
+
   async function extractConcepts() {
     const pid = conceptModal?.profileId;
     if (!pid) return;
     setConceptBusy(true);
     setStatus("소스에서 개념(동의어·변형 표기) 추출 중… (문서가 길면 걸립니다)");
     try {
-      const r = await fetchJson(`/api/profiles/${pid}/concepts/extract`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      const r = await fetchJson(`/api/profiles/${pid}/concepts/extract`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ autoConfirm: autoConfirmConcepts })
+      });
       setConcepts(await fetchJson(`/api/profiles/${pid}/concepts`));
-      setStatus(`개념 ${r.created}개 초안 생성됨 — 검토 후 확정하세요`);
+      setStatus(
+        r.autoConfirmed
+          ? `개념 ${r.created}개 추출·자동 확정됨 — 검색에 바로 반영`
+          : `개념 ${r.created}개 초안 생성됨 — 검토 후 확정하세요`
+      );
     } catch (error) {
       setStatus(`개념 추출 실패: ${error.message}`);
     } finally {
@@ -1962,12 +1978,16 @@ function App() {
               </p>
               <div className="install-actions">
                 <button type="button" className="secondary" onClick={extractConcepts} disabled={conceptBusy}>
-                  <Sparkles size={15} />{conceptBusy ? "작업 중…" : "소스에서 개념 추출 (초안)"}
+                  <Sparkles size={15} />{conceptBusy ? "작업 중…" : autoConfirmConcepts ? "소스에서 개념 추출 (자동 확정)" : "소스에서 개념 추출 (초안)"}
                 </button>
                 <button type="button" className="secondary" onClick={generateAllCards} disabled={conceptBusy || !concepts.some((c) => c.reviewStatus === "confirmed")}>
                   <FileText size={15} />전체 정리 카드 생성
                 </button>
               </div>
+              <label className="auto-confirm-row">
+                <input type="checkbox" checked={autoConfirmConcepts} onChange={() => toggleAutoConfirmConcepts()} />
+                추출 후 <b>자동 확정</b> — 검토 없이 바로 검색에 반영 (문서가 많을 때 편리)
+              </label>
               <p className="skill-group-label optional">
                 <b>정리 카드</b>: 개념마다 여러 소스에 흩어진 기술을 하나로 종합(중복 병합 · ⚠️ 소스 간 불일치 표시)해
                 검색 가능한 문서로 색인합니다. 근거 번호 [n]으로 원본과 연결됩니다.

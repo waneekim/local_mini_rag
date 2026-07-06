@@ -577,7 +577,7 @@ class RagService {
     return rows.map(hydrateConcept);
   }
 
-  upsertConcept(profileId, input = {}) {
+  upsertConcept(profileId, input = {}, { skipRetag = false } = {}) {
     this.ensureProfile(profileId);
     const at = nowIso();
     const existing = input.id
@@ -608,7 +608,7 @@ class RagService {
       const dup = one(this.db, "SELECT * FROM concepts WHERE profile_id = ? AND norm_key = ?", profileId, normKey);
       if (dup) {
         const merged = [...new Set([...hydrateConcept(dup).aliases, ...fields.aliases])];
-        return this.upsertConcept(profileId, { ...input, id: dup.id, aliases: merged });
+        return this.upsertConcept(profileId, { ...input, id: dup.id, aliases: merged }, { skipRetag });
       }
       conceptId = id("concept");
       run(
@@ -620,7 +620,8 @@ class RagService {
       );
     }
     // Keep the chunk links in sync whenever a confirmed concept changes.
-    if (reviewStatus === "confirmed") this.retagConcepts(profileId);
+    // (Bulk callers pass skipRetag and run one retag at the end instead.)
+    if (reviewStatus === "confirmed" && !skipRetag) this.retagConcepts(profileId);
     return hydrateConcept(one(this.db, "SELECT * FROM concepts WHERE id = ?", conceptId));
   }
 
@@ -633,9 +634,11 @@ class RagService {
   }
 
   // LLM-assisted extraction: find concepts (one meaning, many surface forms)
-  // in the indexed sources, stored as drafts for review.
+  // in the indexed sources. Default: drafts for review. autoConfirm skips the
+  // review stop — extracted concepts are confirmed and linked in one pass.
   async extractConcepts(profileId, input = {}) {
     this.ensureProfile(profileId);
+    const autoConfirm = Boolean(input.autoConfirm);
     const sourceIds = Array.isArray(input.sourceIds) && input.sourceIds.length
       ? input.sourceIds
       : all(this.db, "SELECT id FROM sources WHERE profile_id = ?", profileId).map((r) => r.id);
@@ -660,10 +663,17 @@ class RagService {
         continue;
       }
       for (const record of parseConceptRecords(out)) {
-        created.push(this.upsertConcept(profileId, { ...record, sourceId: window.sourceId, reviewStatus: "draft" }));
+        created.push(
+          this.upsertConcept(
+            profileId,
+            { ...record, sourceId: window.sourceId, reviewStatus: autoConfirm ? "confirmed" : "draft" },
+            { skipRetag: true } // one retag below instead of per-concept
+          )
+        );
       }
     }
-    return { created: created.length, concepts: created };
+    if (autoConfirm && created.length) this.retagConcepts(profileId);
+    return { created: created.length, autoConfirmed: autoConfirm, concepts: created };
   }
 
   // Re-link every chunk in the profile to the confirmed concepts it mentions

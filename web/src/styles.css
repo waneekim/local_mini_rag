@@ -1125,6 +1125,13 @@ input:focus, select:focus, textarea:focus {
 .lint-hits { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
 .lint-hit { padding: 8px 10px; border-radius: 8px; background: rgba(210, 153, 34, 0.14); font-size: 0.84rem; }
 .lint-rule { margin-top: 3px; opacity: 0.75; font-size: 0.78rem; }
+/* Auto-confirm checkbox row in the 의미 사전 modal */
+.auto-confirm-row {
+  display: flex; align-items: center; gap: 7px; margin-top: 8px;
+  font-size: 0.8rem; opacity: 0.85; cursor: pointer;
+}
+.auto-confirm-row input { width: auto; min-height: unset; }
+
 /* Concept card preview inside the 의미 사전 modal */
 .card-preview { margin-top: 6px; font-size: 0.78rem; }
 .card-preview summary { cursor: pointer; color: var(--accent, #5888ff); }

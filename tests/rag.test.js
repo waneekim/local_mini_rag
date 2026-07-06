@@ -812,6 +812,40 @@ test("concept layer bridges variant phrasing from query to source chunks", async
   }
 });
 
+test("concept extraction with autoConfirm skips review and links chunks immediately", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-autoc-"));
+  const conceptJson = JSON.stringify([
+    { name: "동작 대기", aliases: ["대기 중", "스탠바이"], definition: "켜져 있지만 동작하지 않는 상태" }
+  ]);
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      complete: async () => conceptJson,
+      generate: async () => ({ answer: "ok", provider: {}, raw: {} })
+    }
+  });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    await post(app, `/api/profiles/${p.id}/sources/text`, { title: "전력", text: "스탠바이에서는 소비 전력이 감소합니다." });
+    const job = await post(app, `/api/profiles/${p.id}/index`, {});
+    await waitForJob(app, job.id);
+
+    const extracted = await post(app, `/api/profiles/${p.id}/concepts/extract`, { autoConfirm: true });
+    assert.equal(extracted.autoConfirmed, true);
+    assert.equal(extracted.concepts.every((c) => c.reviewStatus === "confirmed"), true);
+
+    // No review step needed: interpretation + linked-chunk boost work right away.
+    const search = await post(app, `/api/profiles/${p.id}/search`, { query: "대기 중 전력" });
+    assert.equal(search.concepts[0].name, "동작 대기");
+    assert.equal(search.hits[0].conceptScore > 0, true);
+  } finally {
+    await app.close();
+  }
+});
+
 test("concept cards: consolidated cross-source write-up, indexed and re-generable", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "rag-card-"));
   const cardMd = "# 동작 대기\n## 정의\n켜져 있지만 동작하지 않는 상태 [1]\n## ⚠️ 소스 간 불일치\n[1]은 50% 감소, [2]는 30% 감소로 기술";
