@@ -812,6 +812,68 @@ test("concept layer bridges variant phrasing from query to source chunks", async
   }
 });
 
+test("concept cards: consolidated cross-source write-up, indexed and re-generable", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-card-"));
+  const cardMd = "# 동작 대기\n## 정의\n켜져 있지만 동작하지 않는 상태 [1]\n## ⚠️ 소스 간 불일치\n[1]은 50% 감소, [2]는 30% 감소로 기술";
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      complete: async () => cardMd, // card synthesis
+      generate: async () => ({ answer: "ok", provider: {}, raw: {} })
+    }
+  });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    // Two sources describing the same thing with different wording/numbers.
+    await post(app, `/api/profiles/${p.id}/sources/text`, { title: "사양서A", text: "스탠바이에서는 소비 전력이 50% 감소합니다." });
+    await post(app, `/api/profiles/${p.id}/sources/text`, { title: "사양서B", text: "대기 중에는 전력 소모가 30% 줄어듭니다." });
+    const job = await post(app, `/api/profiles/${p.id}/index`, {});
+    await waitForJob(app, job.id);
+
+    const concept = await post(app, `/api/profiles/${p.id}/concepts`, {
+      name: "동작 대기", aliases: ["대기 중", "스탠바이"], definition: "켜져 있지만 동작하지 않는 상태"
+    });
+
+    // Generate the card: stored on the concept AND indexed under the system source.
+    const withCard = await post(app, `/api/profiles/${p.id}/concepts/${concept.id}/card`, {});
+    assert.equal(withCard.cardMd, cardMd);
+    assert.equal(withCard.cardChunkId.length > 0, true);
+
+    let sources = await get(app, `/api/profiles/${p.id}/sources`);
+    const cardSource = sources.find((s) => s.kind === "concept-cards");
+    assert.ok(cardSource, "expected the 🧠 card source");
+    assert.equal(cardSource.chunkCount, 1);
+
+    // The card is retrievable and rides the concept boost.
+    const search = await post(app, `/api/profiles/${p.id}/search`, { query: "대기 중 전력" });
+    const cardHit = search.hits.find((h) => h.sourceKind === "concept-cards");
+    assert.ok(cardHit, "card chunk should be retrieved");
+    assert.match(cardHit.text, /소스 간 불일치/);
+    assert.equal(cardHit.conceptScore > 0, true);
+
+    // Regeneration replaces the old card chunk instead of accumulating.
+    await post(app, `/api/profiles/${p.id}/concepts/${concept.id}/card`, {});
+    sources = await get(app, `/api/profiles/${p.id}/sources`);
+    assert.equal(sources.find((s) => s.kind === "concept-cards").chunkCount, 1);
+
+    // Bulk job covers all confirmed concepts.
+    const cardsJob = await post(app, `/api/profiles/${p.id}/concepts/cards`, {});
+    const done = await waitForJob(app, cardsJob.id);
+    assert.equal(done.processed_sources, 1);
+    assert.equal(done.failed_sources, 0);
+
+    // Deleting the concept removes its card chunk too.
+    await app.inject({ method: "DELETE", url: `/api/profiles/${p.id}/concepts/${concept.id}` });
+    sources = await get(app, `/api/profiles/${p.id}/sources`);
+    assert.equal(sources.find((s) => s.kind === "concept-cards").chunkCount, 0);
+  } finally {
+    await app.close();
+  }
+});
+
 test("settings test endpoint reports per-server connection status", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "rag-conn-"));
   process.env.RAG_URL_TIMEOUT_MS = "400"; // fail fast on the unreachable probe

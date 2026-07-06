@@ -120,6 +120,12 @@ export function createDatabase(dbPath) {
       definition TEXT NOT NULL DEFAULT '',
       source_id TEXT NOT NULL DEFAULT '',
       review_status TEXT NOT NULL DEFAULT 'confirmed',
+      -- Consolidated card: cross-source summary of this concept (definition,
+      -- conditions, triggers, phrasing differences, conflicts), synthesized by
+      -- the LLM from the linked chunks and indexed as a retrievable chunk.
+      card_md TEXT NOT NULL DEFAULT '',
+      card_chunk_id TEXT NOT NULL DEFAULT '',
+      card_updated_at TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -182,6 +188,14 @@ function migrate(db) {
   // Hierarchy columns materialized onto chunks so retrieval can scope/boost by
   // location: folder_path from the source's relative path (계약서/2024/벤더) and
   // heading_path from the structured Markdown headings (대제목 > 소제목).
+  // Card columns for concepts tables created before the card feature.
+  const conceptColumns = db.prepare("PRAGMA table_info(concepts)").all().map((c) => c.name);
+  for (const col of ["card_md", "card_chunk_id", "card_updated_at"]) {
+    if (!conceptColumns.includes(col)) {
+      db.exec(`ALTER TABLE concepts ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''`);
+    }
+  }
+
   const chunkColumns = db.prepare("PRAGMA table_info(chunks)").all().map((c) => c.name);
   const addedFolder = !chunkColumns.includes("folder_path");
   const addedHeading = !chunkColumns.includes("heading_path");

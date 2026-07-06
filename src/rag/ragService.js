@@ -24,7 +24,9 @@ import {
   parseGlossaryRecords
 } from "./glossary.js";
 import {
+  CONCEPT_CARD_SYSTEM,
   CONCEPT_EXTRACTION_SYSTEM,
+  buildCardPrompt,
   buildConceptBlock,
   expandQuery,
   matchConcepts,
@@ -624,6 +626,8 @@ class RagService {
 
   deleteConcept(profileId, conceptId) {
     this.ensureProfile(profileId);
+    const row = one(this.db, "SELECT card_chunk_id FROM concepts WHERE id = ? AND profile_id = ?", conceptId, profileId);
+    if (row?.card_chunk_id) run(this.db, "DELETE FROM chunks WHERE id = ?", row.card_chunk_id);
     run(this.db, "DELETE FROM concepts WHERE id = ? AND profile_id = ?", conceptId, profileId);
     return { ok: true };
   }
@@ -682,6 +686,131 @@ class RagService {
       }
     }
     return { tagged, concepts: concepts.length };
+  }
+
+  // --- Concept cards (정리 레이어) -------------------------------------------
+  // For one confirmed concept, gather its linked chunks ACROSS sources and ask
+  // the LLM for a consolidated card: definition, conditions, triggers, phrasing
+  // differences, and explicit source-vs-source conflicts. The card is stored on
+  // the concept AND indexed as a retrievable chunk (linked back to the concept),
+  // so questions hit the clean write-up first and drill down to the originals.
+
+  async generateConceptCard(profileId, conceptId) {
+    this.ensureProfile(profileId);
+    const row = one(this.db, "SELECT * FROM concepts WHERE id = ? AND profile_id = ?", conceptId, profileId);
+    if (!row) throw Object.assign(new Error("Concept not found"), { statusCode: 404 });
+    const concept = hydrateConcept(row);
+    if (concept.reviewStatus !== "confirmed") {
+      throw Object.assign(new Error("확정된 개념만 카드를 만들 수 있습니다."), { statusCode: 400 });
+    }
+    if (typeof this.llm.complete !== "function") {
+      throw Object.assign(new Error("현재 LLM 설정으로는 카드 생성을 할 수 없습니다."), { statusCode: 400 });
+    }
+
+    // Evidence = linked original chunks only (never other cards, never its own).
+    const evidence = all(
+      this.db,
+      `SELECT chunks.id, chunks.text, sources.title
+       FROM chunk_concepts
+       JOIN chunks ON chunks.id = chunk_concepts.chunk_id
+       JOIN sources ON sources.id = chunks.source_id
+       WHERE chunk_concepts.concept_id = ? AND chunk_concepts.profile_id = ? AND sources.kind != 'concept-cards'
+       ORDER BY sources.created_at ASC, chunks.chunk_index ASC
+       LIMIT 12`,
+      conceptId,
+      profileId
+    );
+    if (!evidence.length) {
+      throw Object.assign(new Error("이 개념과 링크된 원본 청크가 없습니다. 먼저 소스를 임베딩하세요."), { statusCode: 400 });
+    }
+
+    const cardMd = String(
+      await this.llm.complete({ system: CONCEPT_CARD_SYSTEM, user: buildCardPrompt(concept, evidence) })
+    ).trim();
+    if (!cardMd) throw new Error("카드 생성 결과가 비어 있습니다.");
+
+    // Re-index the card as a chunk under the per-profile system source.
+    const cardSource = this._ensureCardSource(profileId);
+    if (concept.cardChunkId) run(this.db, "DELETE FROM chunks WHERE id = ?", concept.cardChunkId);
+    const [vector] = await this.embeddings.embed([`[개념 카드 · ${concept.name}]\n${cardMd}`], { mode: "passage" });
+    const at = nowIso();
+    const chunkId = id("chunk");
+    run(
+      this.db,
+      `INSERT INTO chunks (id, profile_id, source_id, chunk_index, text, locator_json, embedding_json, folder_path, heading_path, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      chunkId, profileId, cardSource.id, 0, cardMd,
+      JSON.stringify({ card: true, conceptId, concept: concept.name }),
+      JSON.stringify(vector), "", `개념 카드 > ${concept.name}`, at
+    );
+    // Link the card chunk to its concept so the concept boost surfaces it first.
+    run(this.db, "INSERT OR IGNORE INTO chunk_concepts (chunk_id, concept_id, profile_id) VALUES (?, ?, ?)", chunkId, conceptId, profileId);
+    run(
+      this.db,
+      "UPDATE concepts SET card_md = ?, card_chunk_id = ?, card_updated_at = ?, updated_at = ? WHERE id = ?",
+      cardMd, chunkId, at, at, conceptId
+    );
+    return hydrateConcept(one(this.db, "SELECT * FROM concepts WHERE id = ?", conceptId));
+  }
+
+  // Generate cards for all (or given) confirmed concepts as a background job —
+  // one LLM call per concept, progress visible via the jobs API.
+  async startCardJob(profileId, input = {}) {
+    this.ensureProfile(profileId);
+    const onlyIds = Array.isArray(input.conceptIds) && input.conceptIds.length ? new Set(input.conceptIds) : null;
+    const targets = this.listConcepts(profileId, { reviewStatus: "confirmed" }).filter((c) => !onlyIds || onlyIds.has(c.id));
+    const at = nowIso();
+    const job = {
+      id: id("job"), profile_id: profileId, type: "cards", status: "queued", message: "Queued",
+      total_sources: targets.length, processed_sources: 0, failed_sources: 0, created_at: at, updated_at: at
+    };
+    run(
+      this.db,
+      `INSERT INTO jobs (id, profile_id, type, status, message, total_sources, processed_sources, failed_sources, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      job.id, job.profile_id, job.type, job.status, job.message,
+      job.total_sources, job.processed_sources, job.failed_sources, job.created_at, job.updated_at
+    );
+    queueMicrotask(async () => {
+      let processed = 0;
+      let failed = 0;
+      updateJob(this.db, job.id, { status: "running", message: "Building cards" });
+      for (const concept of targets) {
+        try {
+          await this.generateConceptCard(profileId, concept.id);
+        } catch (error) {
+          this.logger?.warn?.(`card generation failed (${concept.name}): ${error.message}`);
+          failed += 1;
+        }
+        processed += 1;
+        updateJob(this.db, job.id, {
+          status: "running", message: `Cards ${processed}/${targets.length}`,
+          processed_sources: processed, failed_sources: failed
+        });
+      }
+      updateJob(this.db, job.id, {
+        status: failed ? "completed_with_errors" : "completed",
+        message: failed ? `${failed} card(s) failed` : "Completed",
+        processed_sources: processed, failed_sources: failed
+      });
+    });
+    return job;
+  }
+
+  // One hidden-ish system source per profile that holds all concept cards, so
+  // cards ride the normal chunk retrieval/citation machinery.
+  _ensureCardSource(profileId) {
+    const existing = one(this.db, "SELECT * FROM sources WHERE profile_id = ? AND kind = 'concept-cards'", profileId);
+    if (existing) return existing;
+    const at = nowIso();
+    const source = {
+      id: id("source"), profile_id: profileId, kind: "concept-cards", title: "🧠 개념 정리 카드",
+      file_name: "", relative_path: "", mime_type: "text/markdown", file_path: "", pasted_text: "",
+      status: "indexed", error: "", metadata_json: JSON.stringify({ system: "concept-cards" }),
+      content_hash: "", created_at: at, updated_at: at, indexed_at: at
+    };
+    insertSource(this.db, source);
+    return source;
   }
 
   // Integrated review: glossary word check + rule lint + style-guide retrieval,
@@ -1764,6 +1893,9 @@ function hydrateConcept(row) {
     definition: row.definition,
     sourceId: row.source_id,
     reviewStatus: row.review_status,
+    cardMd: row.card_md || "",
+    cardChunkId: row.card_chunk_id || "",
+    cardUpdatedAt: row.card_updated_at || "",
     created_at: row.created_at,
     updated_at: row.updated_at
   };

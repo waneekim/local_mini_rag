@@ -608,6 +608,35 @@ function App() {
     }
   }
 
+  // Consolidated card for one concept (cross-source summary + conflicts).
+  async function generateCard(conceptId) {
+    const pid = conceptModal?.profileId;
+    if (!pid) return;
+    setConceptBusy(true);
+    setStatus("정리 카드 생성 중… (여러 소스 종합)");
+    try {
+      const updated = await fetchJson(`/api/profiles/${pid}/concepts/${conceptId}/card`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      setConcepts((prev) => prev.map((c) => (c.id === conceptId ? updated : c)));
+      setStatus("정리 카드 생성됨 — 검색에도 반영됩니다");
+    } catch (error) {
+      setStatus(`카드 생성 실패: ${error.message}`);
+    } finally {
+      setConceptBusy(false);
+    }
+  }
+
+  async function generateAllCards() {
+    const pid = conceptModal?.profileId;
+    if (!pid) return;
+    try {
+      const job = await fetchJson(`/api/profiles/${pid}/concepts/cards`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      setJob(job);
+      setStatus(`확정 개념 ${job.total_sources}개 카드 생성 시작`);
+    } catch (error) {
+      setStatus(`카드 잡 시작 실패: ${error.message}`);
+    }
+  }
+
   // ── UX glossary + integrated review ──
 
   async function openGlossary(pid) {
@@ -1931,9 +1960,18 @@ function App() {
                 묶습니다. 질문이 어느 표기로 들어와도 개념으로 해석해 <strong>원본 소스까지 연결</strong>되고,
                 답변 LLM에도 해석이 전달됩니다.
               </p>
-              <button type="button" className="secondary" onClick={extractConcepts} disabled={conceptBusy}>
-                <Sparkles size={15} />{conceptBusy ? "추출 중…" : "소스에서 개념 추출 (초안)"}
-              </button>
+              <div className="install-actions">
+                <button type="button" className="secondary" onClick={extractConcepts} disabled={conceptBusy}>
+                  <Sparkles size={15} />{conceptBusy ? "작업 중…" : "소스에서 개념 추출 (초안)"}
+                </button>
+                <button type="button" className="secondary" onClick={generateAllCards} disabled={conceptBusy || !concepts.some((c) => c.reviewStatus === "confirmed")}>
+                  <FileText size={15} />전체 정리 카드 생성
+                </button>
+              </div>
+              <p className="skill-group-label optional">
+                <b>정리 카드</b>: 개념마다 여러 소스에 흩어진 기술을 하나로 종합(중복 병합 · ⚠️ 소스 간 불일치 표시)해
+                검색 가능한 문서로 색인합니다. 근거 번호 [n]으로 원본과 연결됩니다.
+              </p>
             </div>
 
             <div className="settings-section">
@@ -1956,12 +1994,23 @@ function App() {
                       <strong>{c.name}</strong>
                       {c.aliases?.length ? <span className="optional">= {c.aliases.join(" · ")}</span> : null}
                       {c.reviewStatus !== "confirmed" && <span className="rule-badge draft">초안</span>}
+                      {c.cardMd && <span className="rule-badge approved">카드</span>}
                     </div>
                     {c.definition ? <p className="term-def">{c.definition}</p> : null}
+                    {c.cardMd ? (
+                      <details className="card-preview">
+                        <summary>정리 카드 보기</summary>
+                        <pre>{c.cardMd}</pre>
+                      </details>
+                    ) : null}
                   </div>
                   <div className="rule-actions">
-                    {c.reviewStatus !== "confirmed" && (
+                    {c.reviewStatus !== "confirmed" ? (
                       <button type="button" className="mini" title="확정 (검색에 반영)" onClick={() => patchConcept(c.id, { reviewStatus: "confirmed" })}>✓</button>
+                    ) : (
+                      <button type="button" className="mini" title={c.cardMd ? "정리 카드 재생성" : "정리 카드 생성"} disabled={conceptBusy} onClick={() => generateCard(c.id)}>
+                        <FileText size={12} />
+                      </button>
                     )}
                     <button type="button" className="mini danger" title="삭제" onClick={() => deleteConcept(c.id)}><Trash2 size={12} /></button>
                   </div>

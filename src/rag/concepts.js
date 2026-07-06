@@ -18,6 +18,33 @@ export const CONCEPT_EXTRACTION_SYSTEM =
   "Only output concepts that genuinely appear in multiple forms or whose meaning " +
   "needs context. 3~10 concepts per input. Do not invent anything.";
 
+// Consolidation card: merge every cross-source mention of one concept into a
+// single clean write-up — deduplicated, with phrasing differences and
+// source-vs-source conflicts made explicit — grounded ONLY in the evidence.
+export const CONCEPT_CARD_SYSTEM =
+  "너는 제품 사양 문서 정리자다. 하나의 개념에 대해 여러 문서에 흩어진 근거를 종합해 " +
+  "하나의 '정리 카드'를 마크다운으로 작성한다.\n" +
+  "형식 (해당 없는 섹션은 생략):\n" +
+  "# {개념 이름}\n" +
+  "## 정의\n## 조건\n## 유발 동작·원인\n## 표기 차이\n## ⚠️ 소스 간 불일치\n" +
+  "규칙:\n" +
+  "- 근거에 있는 내용만 사용하고, 각 항목 끝에 근거 번호 [n]을 붙여라.\n" +
+  "- 여러 문서가 같은 내용을 반복하면 하나로 병합하라(중복 제거).\n" +
+  "- 문서끼리 조건·수치·표현이 서로 다르면 '⚠️ 소스 간 불일치'에 어느 근거가 어떻게 다른지 명시하라.\n" +
+  "- 창작·추측 금지. 한국어로 작성. 카드 본문만 출력(코드 펜스 금지).";
+
+// Build the evidence prompt for one concept from its linked chunks.
+export function buildCardPrompt(concept, evidence) {
+  const head = [
+    `개념: ${concept.name}${concept.aliases?.length ? ` (= ${concept.aliases.join(", ")})` : ""}`,
+    concept.definition ? `뜻: ${concept.definition}` : ""
+  ].filter(Boolean);
+  const body = evidence.map(
+    (e, i) => `[${i + 1}] (${e.title || "source"}) ${String(e.text).replace(/\s+/g, " ").slice(0, 700)}`
+  );
+  return `${head.join("\n")}\n\n근거:\n${body.join("\n")}`;
+}
+
 // Adapt concept records ({name, aliases}) to the glossary scanner's shape.
 export function buildConceptIndex(concepts) {
   return buildTermIndex((concepts || []).map((c) => ({ ...c, term: c.name })));

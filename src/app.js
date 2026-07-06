@@ -346,6 +346,17 @@ export async function createApp(options = {}) {
     return rag.retagConcepts(request.params.profileId);
   });
 
+  // Consolidated cards: one clean cross-source write-up per confirmed concept.
+  app.post("/api/profiles/:profileId/concepts/:conceptId/card", async (request, reply) => {
+    const concept = await rag.generateConceptCard(request.params.profileId, request.params.conceptId);
+    return reply.code(201).send(concept);
+  });
+
+  app.post("/api/profiles/:profileId/concepts/cards", async (request, reply) => {
+    const job = await rag.startCardJob(request.params.profileId, request.body || {});
+    return reply.code(202).send(job);
+  });
+
   // Answer feedback (self-improving memory).
   app.get("/api/profiles/:profileId/feedback", async (request) => {
     return rag.listFeedback(request.params.profileId);
