@@ -342,6 +342,7 @@ test("profile text sources can be indexed, searched, and isolated", async () => 
     const chat = await post(app, `/api/profiles/${profileA.id}/chat`, { query: "환불은 언제 되나요?" });
     assert.equal(chat.answer, "answer with 1 citations");
     assert.equal(chat.citations.length, 1);
+    assert.equal(chat.citations[0].sourceKind, "text"); // UI가 카드/원본을 구분하는 필드
   } finally {
     await app.close();
   }

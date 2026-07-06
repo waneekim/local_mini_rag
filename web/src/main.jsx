@@ -1545,7 +1545,8 @@ function App() {
 
   function openCitationPopup(citation) {
     const locatorParts = [];
-    if (citation.breadcrumb) locatorParts.push(citation.breadcrumb);
+    if (citation.sourceKind === "concept-cards") locatorParts.push("🧠 개념 정리 카드 — 여러 소스를 종합한 문서");
+    else if (citation.breadcrumb) locatorParts.push(citation.breadcrumb);
     else if (citation.locator?.relativePath) locatorParts.push(citation.locator.relativePath);
     if (citation.locator?.page) locatorParts.push(`페이지 ${citation.locator.page}`);
     if (citation.locator?.slide) locatorParts.push(`슬라이드 ${citation.locator.slide}`);
@@ -2938,43 +2939,66 @@ function App() {
                           {msg.role === "assistant" ? renderAnswerText(msg.content, msg.citations, openCitationPopup) : msg.content}
                         </p>
                       )}
-                      {msg.role === "assistant" && msg.concepts?.length ? (
-                        <div className="msg-concepts">
-                          🧭 해석: {msg.concepts.map((c) => `${(c.surfaces || []).join("/") || c.name} → ${c.name}`).join(" · ")}
-                        </div>
-                      ) : null}
-                      {msg.role === "assistant" && msg.violations?.length ? (
-                        <div className="msg-violations">
-                          {msg.violations.map((v, i) => (
-                            <div key={i} className="lint-hit">
-                              ⚠️ 금지 표현 <b>'{v.match}'</b>{v.suggest ? <> → 권장 <b>{v.suggest}</b></> : null}
-                              {v.section ? <span className="optional"> · {v.section}</span> : null}
+                      {/* Answer meta: interpretation + rule hits in one consistent block */}
+                      {msg.role === "assistant" && (msg.concepts?.length || msg.violations?.length) ? (
+                        <div className="answer-meta">
+                          {msg.concepts?.length ? (
+                            <div className="meta-row concept">
+                              <span className="meta-ico">🧭</span>
+                              <span>{msg.concepts.map((c) => `${(c.surfaces || []).join("/") || c.name} → ${c.name}`).join(" · ")}</span>
+                            </div>
+                          ) : null}
+                          {(msg.violations || []).map((v, i) => (
+                            <div key={i} className="meta-row warn">
+                              <span className="meta-ico">⚠️</span>
+                              <span>
+                                금지 표현 <b>'{v.match}'</b>{v.suggest ? <> → 권장 <b>{v.suggest}</b></> : null}
+                                {v.section ? <span className="optional"> · {v.section}</span> : null}
+                              </span>
                             </div>
                           ))}
                         </div>
                       ) : null}
+                      {/* Answer footer: evidence summary (click → citations panel) + feedback */}
                       {msg.role === "assistant" && msg.query ? (
-                        fbForm?.msgId === msg.id ? (
-                          <div className="fb-form">
-                            <input value={fbForm.note} onChange={(e) => setFbForm((f) => ({ ...f, note: e.target.value }))} placeholder="무엇이 문제였나요? (선택)" />
-                            <input value={fbForm.correction} onChange={(e) => setFbForm((f) => ({ ...f, correction: e.target.value }))} placeholder="올바른 답/방향 (선택)" />
-                            <div className="fb-form-actions">
-                              <button type="button" className="secondary mini-btn" onClick={() => setFbForm(null)}>취소</button>
-                              <button type="button" className="mini-btn" onClick={() => submitFeedback(msg, -1, fbForm.note, fbForm.correction)}>저장</button>
+                        <>
+                          <div className="answer-footer">
+                            <div className="evidence-chips">
+                              {(() => {
+                                const cites = msg.panelCitations || msg.citations || [];
+                                const cards = cites.filter((c) => c.sourceKind === "concept-cards").length;
+                                const docs = cites.length - cards;
+                                if (!cites.length) return <span className="evidence-none">근거 없음</span>;
+                                return (
+                                  <button type="button" className="evidence-btn" title="참조 문서 패널에 표시" onClick={() => setActiveCitations(cites)}>
+                                    {docs > 0 && <span>근거 {docs}</span>}
+                                    {cards > 0 && <span className="chip-card">🧠 카드 {cards}</span>}
+                                  </button>
+                                );
+                              })()}
+                            </div>
+                            <div className="msg-feedback">
+                              {msg.feedback ? (
+                                <span className="fb-done">{msg.feedback > 0 ? "👍 기록됨" : "👎 기록됨"}</span>
+                              ) : (
+                                <>
+                                  <button type="button" title="좋은 답변" onClick={() => rateMessage(msg, 1)}><ThumbsUp size={14} /></button>
+                                  <button type="button" title="개선 필요" onClick={() => rateMessage(msg, -1)}><ThumbsDown size={14} /></button>
+                                </>
+                              )}
                             </div>
                           </div>
-                        ) : (
-                          <div className="msg-feedback">
-                            {msg.feedback ? (
-                              <span className="fb-done">{msg.feedback > 0 ? "👍 좋은 답변으로 기록됨" : "👎 개선점으로 기록됨"}</span>
-                            ) : (
-                              <>
-                                <button type="button" title="좋은 답변" onClick={() => rateMessage(msg, 1)}><ThumbsUp size={14} /></button>
-                                <button type="button" title="개선 필요" onClick={() => rateMessage(msg, -1)}><ThumbsDown size={14} /></button>
-                              </>
-                            )}
-                          </div>
-                        )
+                          {fbForm?.msgId === msg.id && (
+                            <div className="fb-form">
+                              <input value={fbForm.note} onChange={(e) => setFbForm((f) => ({ ...f, note: e.target.value }))} placeholder="무엇이 문제였나요? (선택)" />
+                              <input value={fbForm.correction} onChange={(e) => setFbForm((f) => ({ ...f, correction: e.target.value }))} placeholder="올바른 답/방향 (선택)" />
+                              <div className="fb-form-actions">
+                                <button type="button" className="secondary mini-btn" onClick={() => setFbForm(null)}>취소</button>
+                                <button type="button" className="mini-btn" onClick={() => submitFeedback(msg, -1, fbForm.note, fbForm.correction)}>저장</button>
+                              </div>
+                            </div>
+                          )}
+                        </>
                       ) : null}
                     </div>
                   </div>
@@ -3091,11 +3115,12 @@ function App() {
               <ul className="citations-list">
                 {activeCitations.map((c) => (
                   <li key={c.number}>
-                    <button className="citation-link" type="button" onClick={() => openCitationPopup(c)}>
+                    <button className={`citation-link ${c.sourceKind === "concept-cards" ? "card" : ""}`} type="button" onClick={() => openCitationPopup(c)}>
                       <span className="citation-num">[{c.number}]</span>
-                      <span className="citation-title">{c.title}</span>
+                      <span className="citation-title">{c.sourceKind === "concept-cards" ? (c.locator?.concept || c.title) : c.title}</span>
+                      {c.sourceKind === "concept-cards" && <span className="citation-kind">🧠 정리 카드</span>}
                       {c.locator?.page && <span className="citation-loc">p.{c.locator.page}</span>}
-                      {c.breadcrumb && <span className="citation-crumb">{c.breadcrumb}</span>}
+                      {c.sourceKind !== "concept-cards" && c.breadcrumb && <span className="citation-crumb">{c.breadcrumb}</span>}
                     </button>
                   </li>
                 ))}
@@ -3188,8 +3213,15 @@ function renderAnswerText(text, citations, onCitationClick) {
     if (match) {
       const citation = citations.find((c) => c.number === parseInt(match[1], 10));
       if (citation) {
+        const isCard = citation.sourceKind === "concept-cards";
         return (
-          <button key={i} className="citation-ref" type="button" onClick={() => onCitationClick(citation)}>
+          <button
+            key={i}
+            className={`citation-ref ${isCard ? "card" : ""}`}
+            type="button"
+            title={isCard ? `🧠 정리 카드: ${citation.locator?.concept || citation.title}` : citation.breadcrumb || citation.title}
+            onClick={() => onCitationClick(citation)}
+          >
             {part}
           </button>
         );
