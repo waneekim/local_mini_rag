@@ -107,6 +107,38 @@ export function createDatabase(dbPath) {
     );
     CREATE INDEX IF NOT EXISTS idx_glossary_profile_key ON glossary_terms(profile_id, norm_key);
 
+    -- Semantic middle layer: canonical concepts with their variant surface
+    -- forms ("동작 대기" ↔ "대기 중"/"스탠바이") plus a short definition. Chunks
+    -- are linked to the concepts they mention, so a query phrased one way can
+    -- reach source text phrased another way — meaning first, then the source.
+    CREATE TABLE IF NOT EXISTS concepts (
+      id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      norm_key TEXT NOT NULL,
+      aliases_json TEXT NOT NULL DEFAULT '[]',
+      definition TEXT NOT NULL DEFAULT '',
+      source_id TEXT NOT NULL DEFAULT '',
+      review_status TEXT NOT NULL DEFAULT 'confirmed',
+      -- Consolidated card: cross-source summary of this concept (definition,
+      -- conditions, triggers, phrasing differences, conflicts), synthesized by
+      -- the LLM from the linked chunks and indexed as a retrievable chunk.
+      card_md TEXT NOT NULL DEFAULT '',
+      card_chunk_id TEXT NOT NULL DEFAULT '',
+      card_updated_at TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_concepts_profile ON concepts(profile_id, norm_key);
+
+    CREATE TABLE IF NOT EXISTS chunk_concepts (
+      chunk_id TEXT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+      concept_id TEXT NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+      profile_id TEXT NOT NULL,
+      PRIMARY KEY (chunk_id, concept_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunk_concepts ON chunk_concepts(profile_id, concept_id);
+
     CREATE TABLE IF NOT EXISTS feedback (
       id TEXT PRIMARY KEY,
       profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
@@ -156,6 +188,14 @@ function migrate(db) {
   // Hierarchy columns materialized onto chunks so retrieval can scope/boost by
   // location: folder_path from the source's relative path (계약서/2024/벤더) and
   // heading_path from the structured Markdown headings (대제목 > 소제목).
+  // Card columns for concepts tables created before the card feature.
+  const conceptColumns = db.prepare("PRAGMA table_info(concepts)").all().map((c) => c.name);
+  for (const col of ["card_md", "card_chunk_id", "card_updated_at"]) {
+    if (!conceptColumns.includes(col)) {
+      db.exec(`ALTER TABLE concepts ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''`);
+    }
+  }
+
   const chunkColumns = db.prepare("PRAGMA table_info(chunks)").all().map((c) => c.name);
   const addedFolder = !chunkColumns.includes("folder_path");
   const addedHeading = !chunkColumns.includes("heading_path");

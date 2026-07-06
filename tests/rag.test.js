@@ -10,6 +10,7 @@ import { LlmProvider, parseJsonObject } from "../src/rag/llmProvider.js";
 import { RerankService } from "../src/rag/rerank.js";
 import { buildTreeMarkdown, htmlToText } from "../src/rag/ragService.js";
 import { checkText, normalizeTermKey, scanTerms, buildTermIndex, stripJosa } from "../src/rag/glossary.js";
+import { buildConceptBlock, expandQuery, matchConcepts } from "../src/rag/concepts.js";
 import { normalizeUploadedFileName, sanitizeFileName } from "../src/rag/sanitize.js";
 import { cosineSimilarity } from "../src/rag/vectorMath.js";
 
@@ -735,6 +736,175 @@ test("central library: publish, export, and import into a second instance", asyn
   } finally {
     await host.close();
     await local.close();
+  }
+});
+
+test("concept layer: query interpretation, expansion, and the LLM block", () => {
+  const concepts = [
+    { id: "c1", name: "동작 대기", aliases: ["대기 중", "스탠바이"], definition: "켜져 있지만 동작하지 않는 상태" }
+  ];
+  const matched = matchConcepts("대기 중일 때 전력 소모가 궁금해", concepts);
+  assert.equal(matched.length, 1);
+  assert.equal(matched[0].concept.name, "동작 대기");
+  assert.deepEqual(matched[0].surfaces, ["대기 중"]);
+
+  const expanded = expandQuery("대기 중 전력", matched);
+  assert.match(expanded, /동작 대기/);
+  assert.match(expanded, /스탠바이/); // variants ride along for retrieval
+
+  const block = buildConceptBlock(matched);
+  assert.match(block, /의미 해석/);
+  assert.match(block, /'대기 중' = 개념 '동작 대기'/);
+  assert.match(block, /스탠바이/);
+});
+
+test("concept layer bridges variant phrasing from query to source chunks", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-con-"));
+  let capturedContext = "";
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      complete: async () => "[]",
+      generate: async ({ envelope }) => {
+        capturedContext = envelope.contextText;
+        return { answer: "ok", provider: {}, raw: {} };
+      }
+    }
+  });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    // The source only says "스탠바이" — never the query's words "대기 중".
+    await post(app, `/api/profiles/${p.id}/sources/text`, { title: "전력 가이드", text: "스탠바이에서는 소비 전력이 크게 감소합니다." });
+    await post(app, `/api/profiles/${p.id}/sources/text`, { title: "배송", text: "배송은 보통 2~3일 걸립니다." });
+    const job = await post(app, `/api/profiles/${p.id}/index`, {});
+    await waitForJob(app, job.id);
+
+    // Draft concept: not used yet.
+    const draft = await post(app, `/api/profiles/${p.id}/concepts`, {
+      name: "동작 대기", aliases: ["대기 중", "스탠바이"], definition: "켜져 있지만 동작하지 않는 상태", reviewStatus: "draft"
+    });
+    let search = await post(app, `/api/profiles/${p.id}/search`, { query: "대기 중 전력 소모" });
+    assert.equal(search.concepts.length, 0);
+
+    // Confirm → retag links the 스탠바이 chunk → interpretation + boost kick in.
+    await app.inject({
+      method: "PATCH",
+      url: `/api/profiles/${p.id}/concepts/${draft.id}`,
+      payload: { reviewStatus: "confirmed" },
+      headers: { "content-type": "application/json" }
+    });
+    search = await post(app, `/api/profiles/${p.id}/search`, { query: "대기 중 전력 소모" });
+    assert.equal(search.concepts[0].name, "동작 대기");
+    assert.deepEqual(search.concepts[0].surfaces, ["대기 중"]);
+    assert.equal(search.hits[0].title, "전력 가이드");
+    assert.equal(search.hits[0].conceptScore > 0, true); // linked-chunk boost applied
+
+    // Chat injects the interpretation so the LLM answers by meaning.
+    const chat = await post(app, `/api/profiles/${p.id}/chat`, { query: "대기 중 전력 소모 알려줘" });
+    assert.equal(chat.concepts[0].name, "동작 대기");
+    assert.match(capturedContext, /의미 해석/);
+    assert.match(capturedContext, /동작 대기/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("concept extraction with autoConfirm skips review and links chunks immediately", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-autoc-"));
+  const conceptJson = JSON.stringify([
+    { name: "동작 대기", aliases: ["대기 중", "스탠바이"], definition: "켜져 있지만 동작하지 않는 상태" }
+  ]);
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      complete: async () => conceptJson,
+      generate: async () => ({ answer: "ok", provider: {}, raw: {} })
+    }
+  });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    await post(app, `/api/profiles/${p.id}/sources/text`, { title: "전력", text: "스탠바이에서는 소비 전력이 감소합니다." });
+    const job = await post(app, `/api/profiles/${p.id}/index`, {});
+    await waitForJob(app, job.id);
+
+    const extracted = await post(app, `/api/profiles/${p.id}/concepts/extract`, { autoConfirm: true });
+    assert.equal(extracted.autoConfirmed, true);
+    assert.equal(extracted.concepts.every((c) => c.reviewStatus === "confirmed"), true);
+
+    // No review step needed: interpretation + linked-chunk boost work right away.
+    const search = await post(app, `/api/profiles/${p.id}/search`, { query: "대기 중 전력" });
+    assert.equal(search.concepts[0].name, "동작 대기");
+    assert.equal(search.hits[0].conceptScore > 0, true);
+  } finally {
+    await app.close();
+  }
+});
+
+test("concept cards: consolidated cross-source write-up, indexed and re-generable", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-card-"));
+  const cardMd = "# 동작 대기\n## 정의\n켜져 있지만 동작하지 않는 상태 [1]\n## ⚠️ 소스 간 불일치\n[1]은 50% 감소, [2]는 30% 감소로 기술";
+  const app = await createApp({
+    dataDir,
+    logger: false,
+    cleanupDataDir: true,
+    llmProvider: {
+      describe: () => ({ provider: "test", model: "mock" }),
+      complete: async () => cardMd, // card synthesis
+      generate: async () => ({ answer: "ok", provider: {}, raw: {} })
+    }
+  });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    // Two sources describing the same thing with different wording/numbers.
+    await post(app, `/api/profiles/${p.id}/sources/text`, { title: "사양서A", text: "스탠바이에서는 소비 전력이 50% 감소합니다." });
+    await post(app, `/api/profiles/${p.id}/sources/text`, { title: "사양서B", text: "대기 중에는 전력 소모가 30% 줄어듭니다." });
+    const job = await post(app, `/api/profiles/${p.id}/index`, {});
+    await waitForJob(app, job.id);
+
+    const concept = await post(app, `/api/profiles/${p.id}/concepts`, {
+      name: "동작 대기", aliases: ["대기 중", "스탠바이"], definition: "켜져 있지만 동작하지 않는 상태"
+    });
+
+    // Generate the card: stored on the concept AND indexed under the system source.
+    const withCard = await post(app, `/api/profiles/${p.id}/concepts/${concept.id}/card`, {});
+    assert.equal(withCard.cardMd, cardMd);
+    assert.equal(withCard.cardChunkId.length > 0, true);
+
+    let sources = await get(app, `/api/profiles/${p.id}/sources`);
+    const cardSource = sources.find((s) => s.kind === "concept-cards");
+    assert.ok(cardSource, "expected the 🧠 card source");
+    assert.equal(cardSource.chunkCount, 1);
+
+    // The card is retrievable and rides the concept boost.
+    const search = await post(app, `/api/profiles/${p.id}/search`, { query: "대기 중 전력" });
+    const cardHit = search.hits.find((h) => h.sourceKind === "concept-cards");
+    assert.ok(cardHit, "card chunk should be retrieved");
+    assert.match(cardHit.text, /소스 간 불일치/);
+    assert.equal(cardHit.conceptScore > 0, true);
+
+    // Regeneration replaces the old card chunk instead of accumulating.
+    await post(app, `/api/profiles/${p.id}/concepts/${concept.id}/card`, {});
+    sources = await get(app, `/api/profiles/${p.id}/sources`);
+    assert.equal(sources.find((s) => s.kind === "concept-cards").chunkCount, 1);
+
+    // Bulk job covers all confirmed concepts.
+    const cardsJob = await post(app, `/api/profiles/${p.id}/concepts/cards`, {});
+    const done = await waitForJob(app, cardsJob.id);
+    assert.equal(done.processed_sources, 1);
+    assert.equal(done.failed_sources, 0);
+
+    // Deleting the concept removes its card chunk too.
+    await app.inject({ method: "DELETE", url: `/api/profiles/${p.id}/concepts/${concept.id}` });
+    sources = await get(app, `/api/profiles/${p.id}/sources`);
+    assert.equal(sources.find((s) => s.kind === "concept-cards").chunkCount, 0);
+  } finally {
+    await app.close();
   }
 });
 

@@ -318,6 +318,45 @@ export async function createApp(options = {}) {
     return rag.review(request.params.profileId, request.body || {});
   });
 
+  // Semantic concepts (의미·맥락 레이어): canonical meaning + variant surface
+  // forms, linked to source chunks and used to interpret queries.
+  app.get("/api/profiles/:profileId/concepts", async (request) => {
+    return rag.listConcepts(request.params.profileId, { reviewStatus: request.query?.reviewStatus });
+  });
+
+  app.post("/api/profiles/:profileId/concepts", async (request, reply) => {
+    const concept = rag.upsertConcept(request.params.profileId, request.body || {});
+    return reply.code(201).send(concept);
+  });
+
+  app.patch("/api/profiles/:profileId/concepts/:conceptId", async (request) => {
+    return rag.upsertConcept(request.params.profileId, { ...(request.body || {}), id: request.params.conceptId });
+  });
+
+  app.delete("/api/profiles/:profileId/concepts/:conceptId", async (request) => {
+    return rag.deleteConcept(request.params.profileId, request.params.conceptId);
+  });
+
+  app.post("/api/profiles/:profileId/concepts/extract", async (request, reply) => {
+    const result = await rag.extractConcepts(request.params.profileId, request.body || {});
+    return reply.code(201).send(result);
+  });
+
+  app.post("/api/profiles/:profileId/concepts/retag", async (request) => {
+    return rag.retagConcepts(request.params.profileId);
+  });
+
+  // Consolidated cards: one clean cross-source write-up per confirmed concept.
+  app.post("/api/profiles/:profileId/concepts/:conceptId/card", async (request, reply) => {
+    const concept = await rag.generateConceptCard(request.params.profileId, request.params.conceptId);
+    return reply.code(201).send(concept);
+  });
+
+  app.post("/api/profiles/:profileId/concepts/cards", async (request, reply) => {
+    const job = await rag.startCardJob(request.params.profileId, request.body || {});
+    return reply.code(202).send(job);
+  });
+
   // Answer feedback (self-improving memory).
   app.get("/api/profiles/:profileId/feedback", async (request) => {
     return rag.listFeedback(request.params.profileId);
