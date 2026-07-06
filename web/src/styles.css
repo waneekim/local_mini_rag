@@ -1147,6 +1147,52 @@ input:focus, select:focus, textarea:focus {
   background: rgba(88, 136, 255, 0.1); color: var(--muted, #9aa); line-height: 1.5;
 }
 
+/* ── Minimal background-work signal (pulsing dot) ── */
+.working-dot {
+  width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+  background: var(--accent, #5888ff);
+  animation: working-pulse 1.2s ease-in-out infinite;
+}
+@keyframes working-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+@media (prefers-reduced-motion: reduce) { .working-dot { animation: none; opacity: 0.9; } }
+
+/* ── Sidebar source-add tools ── */
+.source-tools {
+  display: flex; align-items: center; gap: 2px;
+  padding: 4px 10px 6px; border-bottom: 1px solid var(--border, #2a2a2a);
+}
+
+/* ── Sidebar footer (install entry lives here, out of the way) ── */
+.sidebar-footer { margin-top: auto; padding: 8px 10px; border-top: 1px solid var(--border, #2a2a2a); }
+.footer-link {
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 8px;
+  background: transparent; border: 0; border-radius: 8px; cursor: pointer;
+  color: var(--muted, #9aa); font-size: 0.78rem;
+}
+.footer-link:hover { color: var(--ink, #eee); background: rgba(255,255,255,0.05); }
+
+/* ── Document viewer (double-click a source) ── */
+.viewer-modal { max-width: 760px; }
+.viewer-path { margin: -4px 0 8px; font-size: 0.76rem; color: var(--muted, #9aa); }
+.viewer-body {
+  margin: 0; padding: 12px 14px; border-radius: 10px; white-space: pre-wrap;
+  background: rgba(255,255,255,0.04); border: 1px solid var(--border, #2a2a2a);
+  font-family: inherit; font-size: 0.88rem; line-height: 1.65;
+  max-height: 58vh; overflow-y: auto;
+}
+.viewer-actions { align-items: center; margin-top: 10px; }
+
+/* Simplified install modal */
+.install-big { display: flex; flex-wrap: wrap; gap: 9px; margin: 10px 0; }
+.link-btn.big { padding: 11px 18px; font-size: 0.92rem; }
+.link-btn.secondary-link { background: transparent; border: 1px solid var(--border, #2a2a2a); color: var(--ink, #eee); }
+.install-list.big { font-size: 0.9rem; }
+.install-details summary { cursor: pointer; font-size: 0.84rem; color: var(--muted, #9aa); }
+.install-details summary:hover { color: var(--ink, #eee); }
+
 /* ── "내 PC에 설치" local-package guide ── */
 .install-step h3 { display: flex; align-items: center; gap: 8px; }
 .step-no {

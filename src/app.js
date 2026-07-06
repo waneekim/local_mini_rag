@@ -210,8 +210,13 @@ export async function createApp(options = {}) {
     return rag.deleteSource(request.params.profileId, request.params.sourceId);
   });
 
-  // Open a source's original content (double-click in the tree): stream the
-  // uploaded file, redirect to the external URL, or return the pasted text.
+  // Readable content for the in-app document viewer (double-click in the tree).
+  app.get("/api/profiles/:profileId/sources/:sourceId/content", async (request) => {
+    return rag.getSourceContent(request.params.profileId, request.params.sourceId);
+  });
+
+  // Open a source's original content: stream the uploaded file, redirect to
+  // the external URL, or return the pasted text.
   app.get("/api/profiles/:profileId/sources/:sourceId/raw", async (request, reply) => {
     const target = rag.getSourceFile(request.params.profileId, request.params.sourceId);
     if (target.kind === "url") return reply.redirect(target.url);

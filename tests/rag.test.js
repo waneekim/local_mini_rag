@@ -469,6 +469,40 @@ test("preprocess auto-approve structures and indexes in one pass (no review stop
   }
 });
 
+test("source content endpoint prefers normalized markdown, then chunks, then pasted text", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "rag-view-"));
+  const app = await createApp({ dataDir, logger: false, cleanupDataDir: true });
+  try {
+    const p = await post(app, "/api/profiles", { name: "P" });
+    const src = await post(app, `/api/profiles/${p.id}/sources/text`, { title: "메모", text: "원본 텍스트 내용" });
+
+    // Not indexed yet → pasted text is the readable content.
+    let view = await get(app, `/api/profiles/${p.id}/sources/${src.id}/content`);
+    assert.equal(view.content, "원본 텍스트 내용");
+    assert.equal(view.contentSource, "pasted");
+
+    // Indexed → extracted chunk text takes precedence (what xlsx/docx would show).
+    const job = await post(app, `/api/profiles/${p.id}/index`, {});
+    await waitForJob(app, job.id);
+    view = await get(app, `/api/profiles/${p.id}/sources/${src.id}/content`);
+    assert.equal(view.contentSource, "chunks");
+    assert.match(view.content, /원본 텍스트 내용/);
+
+    // Reviewed markdown wins over everything.
+    await app.inject({
+      method: "PATCH",
+      url: `/api/profiles/${p.id}/sources/${src.id}/normalized`,
+      payload: { markdown: "# 정리된 문서" },
+      headers: { "content-type": "application/json" }
+    });
+    view = await get(app, `/api/profiles/${p.id}/sources/${src.id}/content`);
+    assert.equal(view.contentSource, "normalized");
+    assert.equal(view.content, "# 정리된 문서");
+  } finally {
+    await app.close();
+  }
+});
+
 test("source raw endpoint returns the original pasted text", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "rag-raw-"));
   const app = await createApp({ dataDir, logger: false, cleanupDataDir: true });
