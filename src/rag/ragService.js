@@ -11,7 +11,7 @@ import { extractTextFromImage } from "./vision.js";
 import { imageToDataUrl, structureFromImage, structureFromText } from "./preprocess.js";
 import { basenameFromRelative, normalizeUploadedFileName, sanitizeFileName } from "./sanitize.js";
 import { chunkDocuments } from "./chunking.js";
-import { cosineSimilarity, lexicalScore } from "./vectorMath.js";
+import { bm25Scores, cosineSimilarity, lexicalScore } from "./vectorMath.js";
 import { WorkerClient } from "./workerClient.js";
 import { RerankService } from "./rerank.js";
 import { RULE_EXTRACTION_SYSTEM, lintText, buildRuleBlock, parseRuleRecords, normalizeRuleInput } from "./rules.js";
@@ -1687,14 +1687,20 @@ class RagService {
 
     const inScope = (folder) => !scope || folder === scope || String(folder).startsWith(`${scope}/`);
 
-    const scored = chunks
-      .filter((chunk) => inScope(chunk.folder_path || ""))
-      .map((chunk) => {
+    const candidates = chunks.filter((chunk) => inScope(chunk.folder_path || ""));
+    // BM25 lexical scores over the in-scope candidate corpus (concept-expanded
+    // query), normalized 0..1. This is a stronger keyword signal than a plain
+    // token-presence ratio; it fills the same `keywordScore` slot in the blend
+    // below, so concept/path/folder boosting is unchanged.
+    const keywordScores = bm25Scores(retrievalQuery, candidates.map((chunk) => chunk.text));
+
+    const scored = candidates
+      .map((chunk, index) => {
         const vector = JSON.parse(chunk.embedding_json);
         const vectorScore = cosineSimilarity(queryVector, vector);
-        // Lexical match against the concept-expanded query, so variant surface
+        // BM25 match against the concept-expanded query, so variant surface
         // forms in the chunk still count as keyword hits.
-        const keywordScore = lexicalScore(retrievalQuery, chunk.text);
+        const keywordScore = keywordScores[index] || 0;
         // Path boost: reward chunks whose folder/heading names echo the query,
         // so a well-categorised tree nudges the right section up. Empty paths
         // (plain text sources) contribute nothing, keeping legacy behaviour.
