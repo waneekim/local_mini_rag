@@ -1253,6 +1253,44 @@ input:focus, select:focus, textarea:focus {
 .mini.star { font-size: 0.95rem; line-height: 1; }
 .mini.star.on { color: #e8b93c; }
 
+/* ── Review workspace (검수): marked original → rewrite → word verdicts ── */
+.review-workspace { max-width: 720px; }
+.review-input { width: 100%; margin-top: 8px; resize: vertical; font-size: 1rem; line-height: 1.6; }
+.review-run {
+  margin-top: 9px; width: 100%; padding: 11px; font-weight: 700; font-size: 0.92rem;
+  border: 0; border-radius: 10px; cursor: pointer;
+  background: var(--accent, #5888ff); color: #fff;
+}
+.review-run:disabled { opacity: 0.5; cursor: default; }
+.report-block h3 { margin-bottom: 8px; }
+.review-original { margin: 0 0 10px; font-size: 1.02rem; line-height: 1.8; }
+.review-original mark {
+  background: transparent; color: inherit; padding: 0 1px; border-radius: 4px;
+  text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 3px; cursor: help;
+}
+.review-original mark.warn { text-decoration-color: #d4a017; background: rgba(212, 160, 23, 0.14); }
+.review-original mark.crit { text-decoration-color: #e5534b; background: rgba(229, 83, 75, 0.14); }
+.rewrite-block { padding: 10px 12px; border-radius: 10px; background: rgba(88, 136, 255, 0.1); border: 1px solid rgba(88, 136, 255, 0.22); }
+.rewrite-label { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.05em; color: var(--accent, #5888ff); }
+.rewrite-text { margin-top: 3px; font-size: 1.02rem; font-weight: 600; line-height: 1.6; }
+.rewrite-actions { margin-top: 8px; display: flex; align-items: center; gap: 10px; }
+.rewrite-why summary { cursor: pointer; font-size: 0.76rem; color: var(--muted, #9aa); }
+.rewrite-why pre { margin: 6px 0 0; padding: 8px 10px; border-radius: 8px; white-space: pre-wrap; font-family: inherit; font-size: 0.8rem; background: rgba(255,255,255,0.04); }
+.word-rows { display: flex; flex-direction: column; gap: 6px; }
+.word-row { border: 1px solid var(--border, #2a2a2a); border-radius: 9px; }
+.word-row summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 9px; padding: 9px 11px; font-size: 0.88rem; }
+.word-row summary::-webkit-details-marker { display: none; }
+.word-row.ok { opacity: 0.75; }
+.sev-dot { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; }
+.sev-dot.ok { background: #2ea043; }
+.sev-dot.warn { background: #d4a017; }
+.sev-dot.crit { background: #e5534b; }
+.word-tag { margin-left: auto; font-size: 0.7rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.word-tag.ok { color: #2ea043; background: rgba(46, 160, 67, 0.14); }
+.word-tag.warn { color: #d4a017; background: rgba(212, 160, 23, 0.14); }
+.word-tag.crit { color: #e5534b; background: rgba(229, 83, 75, 0.14); }
+.word-body { padding: 0 12px 10px 28px; font-size: 0.82rem; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+
 /* ── Glossary (word dictionary) + integrated review ── */
 .review-out { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 .review-answer {
