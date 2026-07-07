@@ -1795,6 +1795,7 @@ class RagService {
       number: index + 1,
       chunkId: hit.id,
       sourceId: hit.sourceId,
+      sourceKind: hit.sourceKind || "",
       title: hit.title,
       breadcrumb: hit.breadcrumb || "",
       folderPath: hit.folderPath || "",

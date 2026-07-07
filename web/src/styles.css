@@ -1141,10 +1141,40 @@ input:focus, select:focus, textarea:focus {
   font-family: inherit; line-height: 1.55; max-height: 260px; overflow-y: auto;
 }
 
-/* Concept interpretation line under an assistant answer */
-.msg-concepts {
-  margin-top: 7px; padding: 6px 10px; border-radius: 8px; font-size: 0.76rem;
-  background: rgba(88, 136, 255, 0.1); color: var(--muted, #9aa); line-height: 1.5;
+/* ── Answer card meta: interpretation + rule hits, one consistent block ── */
+.answer-meta {
+  margin-top: 9px; display: flex; flex-direction: column; gap: 4px;
+  border-top: 1px solid var(--border, #2a2a2a); padding-top: 8px;
+}
+.meta-row {
+  display: flex; gap: 7px; align-items: baseline;
+  padding: 5px 9px; border-radius: 8px; font-size: 0.78rem; line-height: 1.5;
+}
+.meta-row .meta-ico { flex-shrink: 0; }
+.meta-row.concept { background: rgba(88, 136, 255, 0.1); color: var(--muted, #9aa); }
+.meta-row.warn { background: rgba(212, 160, 23, 0.12); }
+
+/* ── Answer footer: evidence summary + feedback, one row ── */
+.answer-footer {
+  margin-top: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.evidence-btn {
+  display: inline-flex; align-items: center; gap: 8px; padding: 3px 9px;
+  background: transparent; border: 1px solid var(--border, #2a2a2a); border-radius: 999px;
+  font-size: 0.74rem; color: var(--muted, #9aa); cursor: pointer;
+}
+.evidence-btn:hover { color: var(--ink, #eee); border-color: var(--accent, #5888ff); }
+.evidence-btn .chip-card { color: var(--accent, #5888ff); }
+.evidence-none { font-size: 0.74rem; color: var(--muted, #9aa); opacity: 0.7; }
+
+/* Concept-card citations stand apart from original-source citations */
+.citation-ref.card { background: rgba(88, 136, 255, 0.22); }
+.citation-ref.card:hover { background: rgba(88, 136, 255, 0.38); }
+.citation-link.card { background: rgba(88, 136, 255, 0.07); }
+.citation-kind {
+  flex-shrink: 0; font-size: 0.68rem; font-weight: 700; padding: 1px 7px;
+  border-radius: 999px; color: var(--accent, #5888ff);
+  background: rgba(88, 136, 255, 0.14); white-space: nowrap;
 }
 
 /* ── Minimal background-work signal (pulsing dot) ── */
@@ -1250,9 +1280,7 @@ input:focus, select:focus, textarea:focus {
 .rule-pair .good { color: #57b26b; }
 .rule-actions { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
 .mini.primary { background: rgba(46, 160, 67, 0.25); }
-.msg-violations { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
-.msg-violations .lint-hit { font-size: 0.8rem; }
-.msg-feedback { margin-top: 6px; display: flex; gap: 6px; }
+.msg-feedback { display: flex; gap: 6px; }
 .msg-feedback button { background: transparent; border: 1px solid var(--border, #2a2a2a); border-radius: 6px; padding: 3px 8px; cursor: pointer; color: inherit; opacity: 0.6; }
 .msg-feedback button:hover { opacity: 1; }
 .fb-done { font-size: 0.78rem; opacity: 0.7; }
