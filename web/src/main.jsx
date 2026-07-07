@@ -145,8 +145,9 @@ function App() {
   const [editingId, setEditingId] = useState("");
   const [editingName, setEditingName] = useState("");
   const [menu, setMenu] = useState(null);
-  const [textDialog, setTextDialog] = useState(null);
-  const [urlDialog, setUrlDialog] = useState(null);
+  // Unified source-add modal: one entry point, one dialog with tabs for
+  // file / folder / url / text / image. { pid, tab }.
+  const [sourceModal, setSourceModal] = useState(null);
   const [dlgTitle, setDlgTitle] = useState("");
   const [dlgText, setDlgText] = useState("");
   const [dlgUrl, setDlgUrl] = useState("");
@@ -214,6 +215,7 @@ function App() {
 
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
+  const imageInputRef = useRef(null);
   const uploadTargetRef = useRef("");
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
@@ -878,6 +880,7 @@ function App() {
       setBusy(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
       if (folderInputRef.current) folderInputRef.current.value = "";
+      if (imageInputRef.current) imageInputRef.current.value = "";
     }
   }
 
@@ -1200,18 +1203,28 @@ function App() {
     setMenu({ x: e.clientX, y: e.clientY, ...payload });
   }
 
-  // ── Text dialog ──
+  // ── Unified source-add modal (file / folder / url / text / image) ──
 
-  function openTextDialog(pid) {
+  function openSourceModal(pid, tab = "file") {
+    if (!pid) return;
     setDlgTitle("");
     setDlgText("");
-    setTextDialog({ pid });
+    setDlgUrl("");
+    setSourceModal({ pid, tab });
   }
 
-  async function submitTextDialog() {
-    if (!dlgText.trim()) return;
-    const pid = textDialog.pid;
-    setTextDialog(null);
+  // Image sources reuse the file-upload endpoint: the backend already ingests
+  // images (OCR via tesseract / vision structuring) as an "image" kind, so no
+  // new pipeline is needed — the picker is just filtered to image/*.
+  function pickImages(pid) {
+    uploadTargetRef.current = pid;
+    imageInputRef.current?.click();
+  }
+
+  async function submitSourceText() {
+    if (!dlgText.trim() || !sourceModal) return;
+    const pid = sourceModal.pid;
+    setSourceModal(null);
     setBusy(true);
     try {
       await addText(dlgTitle.trim() || "Pasted text", dlgText, pid);
@@ -1221,18 +1234,10 @@ function App() {
     }
   }
 
-  // ── URL dialog ──
-
-  function openUrlDialog(pid) {
-    setDlgTitle("");
-    setDlgUrl("");
-    setUrlDialog({ pid });
-  }
-
-  async function submitUrlDialog() {
-    if (!dlgUrl.trim()) return;
-    const pid = urlDialog.pid;
-    setUrlDialog(null);
+  async function submitSourceUrl() {
+    if (!dlgUrl.trim() || !sourceModal) return;
+    const pid = sourceModal.pid;
+    setSourceModal(null);
     try {
       await addUrl(dlgUrl.trim(), dlgTitle.trim(), pid);
     } catch (e) {
@@ -1960,16 +1965,14 @@ function App() {
       {/* Hidden file inputs */}
       <input ref={fileInputRef} type="file" multiple hidden accept={ACCEPTED_FILE_TYPES} onChange={(e) => uploadEntries(fileListToEntries(e.target.files), uploadTargetRef.current)} />
       <input ref={folderInputRef} type="file" multiple hidden webkitdirectory="" directory="" onChange={(e) => uploadEntries(fileListToEntries(e.target.files), uploadTargetRef.current)} />
+      <input ref={imageInputRef} type="file" multiple hidden accept="image/*" onChange={(e) => uploadEntries(fileListToEntries(e.target.files), uploadTargetRef.current)} />
 
       {/* Context menu */}
       {menu && (
         <div className="context-menu" style={{ left: menu.x, top: menu.y }} onClick={(e) => e.stopPropagation()}>
           {menu.kind === "agent" ? (
             <>
-              <button onClick={() => { pickFiles(menu.pid); setMenu(null); }}><Upload size={14} />파일 추가</button>
-              <button onClick={() => { pickFolder(menu.pid); setMenu(null); }}><FolderUp size={14} />폴더 추가</button>
-              <button onClick={() => { openTextDialog(menu.pid); setMenu(null); }}><FileText size={14} />텍스트 추가</button>
-              <button onClick={() => { openUrlDialog(menu.pid); setMenu(null); }}><Link size={14} />URL 추가</button>
+              <button onClick={() => { openSourceModal(menu.pid); setMenu(null); }}><Plus size={14} />소스 추가</button>
               <button onClick={() => { openRules(menu.pid); setMenu(null); }}><ClipboardCheck size={14} />규칙(가이드)</button>
               <button onClick={() => { openReview(menu.pid); setMenu(null); }}><SpellCheck size={14} />검수(문장 교정)</button>
               <button onClick={() => { openGlossary(menu.pid); setMenu(null); }}><BookOpen size={14} />용어집(단어 사전)</button>
@@ -2399,54 +2402,81 @@ function App() {
         </div>
       )}
 
-      {/* Text dialog */}
-      {textDialog && (
-        <div className="modal-overlay" onClick={() => setTextDialog(null)}>
+      {/* Unified source-add modal: file / folder / url / text / image */}
+      {sourceModal && (
+        <div className="modal-overlay" onClick={() => setSourceModal(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h2>텍스트 소스 추가</h2>
-              <button className="icon-button" type="button" onClick={() => setTextDialog(null)}><X size={18} /></button>
+              <h2>소스 추가</h2>
+              <button className="icon-button" type="button" onClick={() => setSourceModal(null)}><X size={18} /></button>
+            </div>
+            <div className="source-tabs">
+              {[
+                { key: "file", label: "파일", icon: <Upload size={14} /> },
+                { key: "folder", label: "폴더", icon: <FolderUp size={14} /> },
+                { key: "url", label: "URL", icon: <Link size={14} /> },
+                { key: "text", label: "텍스트", icon: <FileText size={14} /> },
+                { key: "image", label: "이미지", icon: <Camera size={14} /> }
+              ].map((t) => (
+                <button
+                  key={t.key}
+                  type="button"
+                  className={`source-tab ${sourceModal.tab === t.key ? "on" : ""}`}
+                  onClick={() => setSourceModal((m) => ({ ...m, tab: t.key }))}
+                >
+                  {t.icon}{t.label}
+                </button>
+              ))}
             </div>
             <div className="settings-section">
-              <div className="settings-grid">
-                <label>제목<input value={dlgTitle} onChange={(e) => setDlgTitle(e.target.value)} placeholder="제목 (선택)" /></label>
-                <label>내용<textarea value={dlgText} onChange={(e) => setDlgText(e.target.value)} placeholder="텍스트 붙여넣기" style={{ minHeight: 180 }} /></label>
-              </div>
+              {sourceModal.tab === "file" && (
+                <div className="source-pick">
+                  <p className="source-hint">PDF · Word · PowerPoint · Excel · 텍스트(.txt/.md/.csv/.json/.html) 파일을 선택합니다. 여러 개 선택 가능.</p>
+                  <button type="button" onClick={() => { const pid = sourceModal.pid; setSourceModal(null); pickFiles(pid); }}><Upload size={15} /> 파일 선택</button>
+                </div>
+              )}
+              {sourceModal.tab === "folder" && (
+                <div className="source-pick">
+                  <p className="source-hint">폴더를 통째로 추가합니다. 🗂 토글이 켜져 있으면 폴더 트리 구조도 소스로 함께 색인됩니다.</p>
+                  <button type="button" onClick={() => { const pid = sourceModal.pid; setSourceModal(null); pickFolder(pid); }}><FolderUp size={15} /> 폴더 선택</button>
+                </div>
+              )}
+              {sourceModal.tab === "url" && (
+                <div className="settings-grid">
+                  <label>
+                    URL
+                    <input
+                      value={dlgUrl}
+                      autoFocus
+                      onChange={(e) => setDlgUrl(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submitSourceUrl(); } }}
+                      placeholder="https://example.com/article"
+                    />
+                  </label>
+                  <label>제목 <span className="optional">(선택 · 비우면 페이지 제목)</span><input value={dlgTitle} onChange={(e) => setDlgTitle(e.target.value)} placeholder="제목" /></label>
+                </div>
+              )}
+              {sourceModal.tab === "text" && (
+                <div className="settings-grid">
+                  <label>제목<input value={dlgTitle} onChange={(e) => setDlgTitle(e.target.value)} placeholder="제목 (선택)" /></label>
+                  <label>내용<textarea value={dlgText} onChange={(e) => setDlgText(e.target.value)} placeholder="텍스트 붙여넣기" style={{ minHeight: 180 }} /></label>
+                </div>
+              )}
+              {sourceModal.tab === "image" && (
+                <div className="source-pick">
+                  <p className="source-hint">이미지를 소스로 추가합니다 — OCR·비전으로 텍스트를 추출해 임베딩합니다 (png · jpg · webp · tif 등). 스크린샷을 <b>대화에 첨부</b>하려면 입력창의 📷를 쓰세요.</p>
+                  <button type="button" onClick={() => { const pid = sourceModal.pid; setSourceModal(null); pickImages(pid); }}><Camera size={15} /> 이미지 선택</button>
+                </div>
+              )}
             </div>
             <div className="modal-footer">
-              <button type="button" className="secondary" onClick={() => setTextDialog(null)}>취소</button>
-              <button type="button" onClick={submitTextDialog} disabled={!dlgText.trim()}>추가</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* URL dialog */}
-      {urlDialog && (
-        <div className="modal-overlay" onClick={() => setUrlDialog(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2>URL 소스 추가</h2>
-              <button className="icon-button" type="button" onClick={() => setUrlDialog(null)}><X size={18} /></button>
-            </div>
-            <div className="settings-section">
-              <div className="settings-grid">
-                <label>
-                  URL
-                  <input
-                    value={dlgUrl}
-                    autoFocus
-                    onChange={(e) => setDlgUrl(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submitUrlDialog(); } }}
-                    placeholder="https://example.com/article"
-                  />
-                </label>
-                <label>제목 <span className="optional">(선택 · 비우면 페이지 제목)</span><input value={dlgTitle} onChange={(e) => setDlgTitle(e.target.value)} placeholder="제목" /></label>
-              </div>
-            </div>
-            <div className="modal-footer">
-              <button type="button" className="secondary" onClick={() => setUrlDialog(null)}>취소</button>
-              <button type="button" onClick={submitUrlDialog} disabled={busy || !dlgUrl.trim()}>{busy ? "가져오는 중…" : "추가"}</button>
+              <button type="button" className="secondary" onClick={() => setSourceModal(null)}>닫기</button>
+              {sourceModal.tab === "url" && (
+                <button type="button" onClick={submitSourceUrl} disabled={busy || !dlgUrl.trim()}>{busy ? "가져오는 중…" : "추가"}</button>
+              )}
+              {sourceModal.tab === "text" && (
+                <button type="button" onClick={submitSourceText} disabled={!dlgText.trim()}>추가</button>
+              )}
             </div>
           </div>
         </div>
@@ -2890,10 +2920,7 @@ function App() {
         {/* Source-add tools: they act on the selected Agent's knowledge, so they
             live next to the sources — not under the chat prompt. */}
         <div className="source-tools">
-          <button className="tool" type="button" title="파일 추가" onClick={() => pickFiles(activeProfileId)}><Upload size={15} /></button>
-          <button className="tool" type="button" title="폴더 추가" onClick={() => pickFolder(activeProfileId)}><FolderUp size={15} /></button>
-          <button className="tool" type="button" title="텍스트 추가" onClick={() => openTextDialog(activeProfileId)}><FileText size={15} /></button>
-          <button className="tool" type="button" title="URL 추가" onClick={() => openUrlDialog(activeProfileId)}><Link size={15} /></button>
+          <button className="tool source-add-btn" type="button" title="소스 추가 · 파일·폴더·URL·텍스트·이미지" onClick={() => openSourceModal(activeProfileId)} disabled={!activeProfileId}><Plus size={15} />소스 추가</button>
           <span className="tool-sep" />
           <button className={`tool toggle ${autoIndex ? "on" : ""}`} type="button" title={`추가 시 자동 임베딩: ${autoIndex ? "켜짐" : "꺼짐"}`} onClick={() => toggleAutoIndex()}>
             <Zap size={15} />

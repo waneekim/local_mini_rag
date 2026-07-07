@@ -1194,6 +1194,39 @@ input:focus, select:focus, textarea:focus {
   display: flex; align-items: center; gap: 2px;
   padding: 4px 10px 6px; border-bottom: 1px solid var(--border, #2a2a2a);
 }
+.source-tools .tool {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 30px; min-height: 30px; padding: 0;
+  border-radius: 8px; background: transparent; color: var(--muted);
+}
+.source-tools .tool:hover { background: var(--bg); color: var(--accent-dark); }
+.source-tools .tool.toggle.on { color: #fff; background: var(--accent); }
+.source-tools .tool.toggle.on:hover { background: var(--accent-dark); }
+/* Primary "소스 추가" CTA — labeled, wider than the icon toggles. */
+.source-tools .source-add-btn {
+  width: auto; gap: 5px; padding: 0 12px; height: 30px;
+  background: var(--accent); color: #fff; font-size: 0.8rem; font-weight: 600;
+}
+.source-tools .source-add-btn:hover { background: var(--accent-dark); color: #fff; }
+.source-tools .source-add-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Unified source-add modal: tab bar + picker panes */
+.source-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 14px; }
+.source-tab {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 7px 12px; border-radius: 8px; font-size: 0.82rem; cursor: pointer;
+  background: transparent; color: var(--muted); border: 1px solid var(--border, #2a2a2a);
+}
+.source-tab:hover { color: var(--ink, #eee); }
+.source-tab.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.source-pick { display: flex; flex-direction: column; gap: 12px; align-items: flex-start; padding: 4px 0 6px; }
+.source-pick button {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 10px 16px; border-radius: 9px; font-size: 0.9rem; cursor: pointer;
+  background: var(--accent); color: #fff; border: 0;
+}
+.source-pick button:hover { background: var(--accent-dark); }
+.source-hint { margin: 0; font-size: 0.82rem; color: var(--muted, #9aa); line-height: 1.55; }
 
 /* ── Sidebar footer (install entry lives here, out of the way) ── */
 .sidebar-footer { margin-top: auto; padding: 8px 10px; border-top: 1px solid var(--border, #2a2a2a); }
