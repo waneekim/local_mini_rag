@@ -28,6 +28,7 @@ import {
   Send,
   Settings,
   Sparkles,
+  SpellCheck,
   ThumbsDown,
   ThumbsUp,
   Trash2,
@@ -192,6 +193,9 @@ function App() {
   const [glossaryTerms, setGlossaryTerms] = useState([]);
   const [glossaryBusy, setGlossaryBusy] = useState(false);
   const [termForm, setTermForm] = useState({ term: "", status: "approved", preferred: "" });
+  // Review workspace (검수): the designer's daily task — one text in, one
+  // integrated correction report out (style rewrite + word verdicts).
+  const [reviewModal, setReviewModal] = useState(null); // { profileId }
   const [reviewInput, setReviewInput] = useState("");
   const [reviewResult, setReviewResult] = useState(null);
   const [reviewBusy, setReviewBusy] = useState(false);
@@ -718,9 +722,15 @@ function App() {
     }
   }
 
+  function openReview(pid) {
+    setReviewModal({ profileId: pid });
+    setReviewInput("");
+    setReviewResult(null);
+  }
+
   // Integrated review: glossary word verdicts + style-guide rewrite in one pass.
   async function runReview() {
-    const pid = glossaryModal?.profileId;
+    const pid = reviewModal?.profileId;
     if (!pid || !reviewInput.trim() || reviewBusy) return;
     setReviewBusy(true);
     setReviewResult(null);
@@ -735,6 +745,38 @@ function App() {
     } finally {
       setReviewBusy(false);
     }
+  }
+
+  // Pull just the corrected sentence out of the LLM's "교정문: … / 이유: …" answer.
+  function extractRewrite(answer) {
+    const match = /교정문[:：]?\s*(.+)/.exec(String(answer || ""));
+    return (match ? match[1] : String(answer || "")).trim().replace(/^["'「]|["'」]$/g, "");
+  }
+
+  // Split the original text into plain/marked segments from the review's term
+  // and missing-word offsets, so issues underline in place (mockup anatomy).
+  function markSegments(text, result) {
+    const marks = [
+      ...(result.terms || []).filter((t) => t.status !== "approved").map((t) => ({
+        offset: t.offset, length: t.surface.length, sev: t.status === "forbidden" ? "crit" : "warn",
+        tip: `${t.status === "forbidden" ? "금지어" : "비권장어"}${t.preferred ? ` → ${t.preferred}` : ""}`
+      })),
+      ...(result.missing || []).map((m) => ({
+        offset: m.offset, length: m.surface.length, sev: "crit", tip: `용어집에 없음: ${m.base}`
+      }))
+    ]
+      .filter((m) => Number.isInteger(m.offset) && m.offset >= 0)
+      .sort((a, b) => a.offset - b.offset);
+    const segments = [];
+    let cursor = 0;
+    for (const mark of marks) {
+      if (mark.offset < cursor) continue; // skip overlaps
+      if (mark.offset > cursor) segments.push({ text: text.slice(cursor, mark.offset) });
+      segments.push({ text: text.slice(mark.offset, mark.offset + mark.length), sev: mark.sev, tip: mark.tip });
+      cursor = mark.offset + mark.length;
+    }
+    if (cursor < text.length) segments.push({ text: text.slice(cursor) });
+    return segments;
   }
 
   async function rateMessage(msg, rating) {
@@ -1929,7 +1971,8 @@ function App() {
               <button onClick={() => { openTextDialog(menu.pid); setMenu(null); }}><FileText size={14} />텍스트 추가</button>
               <button onClick={() => { openUrlDialog(menu.pid); setMenu(null); }}><Link size={14} />URL 추가</button>
               <button onClick={() => { openRules(menu.pid); setMenu(null); }}><ClipboardCheck size={14} />규칙(가이드)</button>
-              <button onClick={() => { openGlossary(menu.pid); setMenu(null); }}><BookOpen size={14} />용어집(단어 검수)</button>
+              <button onClick={() => { openReview(menu.pid); setMenu(null); }}><SpellCheck size={14} />검수(문장 교정)</button>
+              <button onClick={() => { openGlossary(menu.pid); setMenu(null); }}><BookOpen size={14} />용어집(단어 사전)</button>
               <button onClick={() => { openConcepts(menu.pid); setMenu(null); }}><Network size={14} />의미 사전(동의어·맥락)</button>
               <button onClick={() => { openFeedback(menu.pid); setMenu(null); }}><ThumbsUp size={14} />피드백 학습</button>
             </>
@@ -2059,6 +2102,131 @@ function App() {
         </div>
       )}
 
+      {/* Review workspace — the designer's daily task: text in, correction report out */}
+      {reviewModal && (
+        <div className="modal-overlay" onClick={() => setReviewModal(null)}>
+          <div className="modal review-workspace" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>검수 — {profiles.find((p) => p.id === reviewModal.profileId)?.name || "Agent"}</h2>
+              <button className="icon-button" type="button" onClick={() => setReviewModal(null)}><X size={18} /></button>
+            </div>
+
+            <div className="settings-section">
+              <p className="skill-group-label">
+                화면 텍스트를 넣으면 <strong>스타일 가이드 + 용어집 + 규칙</strong>을 한 번에 검수합니다.
+              </p>
+              <textarea
+                className="review-input"
+                rows={3}
+                value={reviewInput}
+                onChange={(e) => setReviewInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); runReview(); } }}
+                placeholder={"예: 사용자의 냉장고 설정을 확인하려면 여기를 눌러주세요"}
+                autoFocus
+              />
+              <button type="button" className="review-run" onClick={runReview} disabled={reviewBusy || !reviewInput.trim()}>
+                {reviewBusy ? "검수 중…" : "검수하기"}
+              </button>
+            </div>
+
+            {reviewResult && (
+              <>
+                {/* 원문 — 문제 단어 인라인 마킹 */}
+                <div className="settings-section report-block">
+                  <h3>원문</h3>
+                  <p className="review-original">
+                    {markSegments(reviewResult.text, reviewResult).map((seg, i) =>
+                      seg.sev ? <mark key={i} className={seg.sev} title={seg.tip}>{seg.text}</mark> : <span key={i}>{seg.text}</span>
+                    )}
+                  </p>
+                  <div className="rewrite-block">
+                    <div className="rewrite-label">✍️ 교정 추천</div>
+                    <div className="rewrite-text">{extractRewrite(reviewResult.answer)}</div>
+                    <div className="rewrite-actions">
+                      <button type="button" className="mini-btn" onClick={() => copyText(extractRewrite(reviewResult.answer))}>교정문 복사</button>
+                      <details className="rewrite-why">
+                        <summary>이유 보기</summary>
+                        <pre>{reviewResult.answer}</pre>
+                      </details>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 단어 검수 — 용어집 판정 */}
+                <div className="settings-section report-block">
+                  <h3>📖 단어 검수 <span className="optional">
+                    ({(reviewResult.terms || []).filter((t) => t.status !== "approved").length + (reviewResult.missing || []).length}건 조치
+                    · 승인어 {(reviewResult.terms || []).filter((t) => t.status === "approved").length})
+                  </span></h3>
+                  <div className="word-rows">
+                    {(reviewResult.terms || []).filter((t) => t.status !== "approved").map((t, i) => (
+                      <details key={`t${i}`} className="word-row">
+                        <summary>
+                          <span className={`sev-dot ${t.status === "forbidden" ? "crit" : "warn"}`} />
+                          <b>{t.surface}</b>
+                          <span className={`word-tag ${t.status === "forbidden" ? "crit" : "warn"}`}>
+                            {t.status === "forbidden" ? "금지어" : "대체 추천"}
+                          </span>
+                        </summary>
+                        <div className="word-body">
+                          {t.preferred && <div>권장: <b>{t.preferred}</b></div>}
+                          {t.definition && <div className="optional">{t.definition}</div>}
+                          {t.category && <div className="optional">분류: {t.category}</div>}
+                        </div>
+                      </details>
+                    ))}
+                    {(reviewResult.missing || []).map((m, i) => (
+                      <details key={`m${i}`} className="word-row">
+                        <summary>
+                          <span className="sev-dot crit" />
+                          <b>{m.base}</b>
+                          <span className="word-tag crit">용어집에 없음</span>
+                        </summary>
+                        <div className="word-body">
+                          <div className="optional">등재되지 않은 단어입니다 — 승인어로 대체하거나 용어집 등록을 검토하세요.</div>
+                          <button type="button" className="mini-btn" onClick={() => { setReviewModal(null); openGlossary(reviewModal.profileId); setTermForm({ term: m.base, status: "approved", preferred: "" }); }}>
+                            용어집에 등록하러 가기
+                          </button>
+                        </div>
+                      </details>
+                    ))}
+                    {(reviewResult.terms || []).filter((t) => t.status === "approved").map((t, i) => (
+                      <details key={`a${i}`} className="word-row ok">
+                        <summary>
+                          <span className="sev-dot ok" />
+                          <b>{t.surface}</b>
+                          <span className="word-tag ok">승인어</span>
+                        </summary>
+                        <div className="word-body">{t.definition ? <div className="optional">{t.definition}</div> : <div className="optional">용어집 등재 단어</div>}</div>
+                      </details>
+                    ))}
+                    {!(reviewResult.terms || []).length && !(reviewResult.missing || []).length && (
+                      <p className="empty tiny">검출된 용어가 없습니다.</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* 스타일 규칙 위반 */}
+                {(reviewResult.violations || []).length > 0 && (
+                  <div className="settings-section report-block">
+                    <h3>✍️ 스타일 규칙</h3>
+                    {(reviewResult.violations || []).map((v, i) => (
+                      <div key={i} className="meta-row warn">
+                        <span className="meta-ico">⚠️</span>
+                        <span>
+                          금지 표현 <b>'{v.match}'</b>{v.suggest ? <> → 권장 <b>{v.suggest}</b></> : null}
+                          {v.principle ? <span className="optional"> · {v.principle}</span> : null}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* UX glossary + integrated review modal */}
       {glossaryModal && (
         <div className="modal-overlay" onClick={() => setGlossaryModal(null)}>
@@ -2070,35 +2238,11 @@ function App() {
 
             <div className="settings-section">
               <p className="skill-group-label">
-                문장을 넣으면 <strong>스타일 가이드 + 용어집</strong>을 한 번에 검수하고 교정문을 제안합니다.
+                단어 사전을 관리합니다. 문장 교정은 <strong>검수 워크스페이스</strong>에서 하세요.
               </p>
-              <div className="skill-repo-row">
-                <input value={reviewInput} onChange={(e) => setReviewInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") runReview(); }} placeholder="예: 사용자의 냉장고를 연동해 주세요" />
-                <button type="button" className="secondary" onClick={runReview} disabled={reviewBusy || !reviewInput.trim()}>
-                  {reviewBusy ? "검수 중…" : "검수"}
-                </button>
-              </div>
-              {reviewResult && (
-                <div className="review-out">
-                  <div className="review-answer">{reviewResult.answer}</div>
-                  {(reviewResult.terms || []).filter((t) => t.status !== "approved").map((t, i) => (
-                    <div key={`t${i}`} className="lint-hit">
-                      {t.status === "forbidden" ? "🔴 금지어" : "🟡 비권장어"} <b>'{t.surface}'</b>
-                      {t.preferred ? <> → 권장 <b>{t.preferred}</b></> : null}
-                      {t.category ? <span className="optional"> · {t.category}</span> : null}
-                    </div>
-                  ))}
-                  {(reviewResult.missing || []).map((m, i) => (
-                    <div key={`m${i}`} className="lint-hit">🔴 용어집에 없음 <b>'{m.base}'</b><span className="optional"> · 등록 검토 대상</span></div>
-                  ))}
-                  {(reviewResult.violations || []).map((v, i) => (
-                    <div key={`v${i}`} className="lint-hit">⚠️ 규칙 위반 <b>'{v.match}'</b>{v.suggest ? <> → 권장 <b>{v.suggest}</b></> : null}</div>
-                  ))}
-                  {!((reviewResult.terms || []).some((t) => t.status !== "approved") || reviewResult.missing?.length || reviewResult.violations?.length) && (
-                    <p className="empty tiny">단어 지적 사항 없음 — 모든 단어가 승인어입니다.</p>
-                  )}
-                </div>
-              )}
+              <button type="button" className="secondary" onClick={() => { setGlossaryModal(null); openReview(glossaryModal.profileId); }}>
+                <SpellCheck size={15} />검수 워크스페이스 열기
+              </button>
             </div>
 
             <div className="settings-section">
