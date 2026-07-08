@@ -123,7 +123,7 @@ function App() {
   const [activeCitations, setActiveCitations] = useState([]);
   const [busy, setBusy] = useState(false);
   const [modes, setModes] = useState([]);
-  const [chatMode, setChatMode] = useState("general");
+  const [chatMode, setChatMode] = useState(() => localStorage.getItem("rag.chatMode") || localStorage.getItem("rag.defaultMode") || "general");
   const [skills, setSkills] = useState([]);
   const [skillRepo, setSkillRepo] = useState("");
   const [availableSkills, setAvailableSkills] = useState([]);
@@ -315,7 +315,7 @@ function App() {
 
   useEffect(() => {
     function onClick() { setMenu(null); setPersonaMenuOpen(false); setSkillMenuOpen(false); }
-    function onKey(e) { if (e.key === "Escape") { setMenu(null); setSourceModal(null); setPersonaMenuOpen(false); setSkillMenuOpen(false); } }
+    function onKey(e) { if (e.key === "Escape") { setMenu(null); setSourceModal(null); setPersonaMenuOpen(false); setSkillMenuOpen(false); setEditingMode(null); } }
     // Paste a screenshot image anywhere in the app → extract text (native ⌃⌘⇧4 → ⌘V).
     function onPaste(e) {
       const item = [...(e.clipboardData?.items || [])].find((it) => it.type.startsWith("image/"));
@@ -1703,16 +1703,25 @@ function App() {
     setSkills(await fetchJson("/api/skills").catch(() => []));
   }
 
+  // Persist the selected persona across reloads (company behavior); the ★
+  // default persona (rag.defaultMode) still wins when nothing was selected.
+  function selectChatMode(key) {
+    const next = key || modes[0]?.key || "general";
+    setChatMode(next);
+    localStorage.setItem("rag.chatMode", next);
+  }
+
   async function loadModes() {
     const list = await fetchJson("/api/modes");
     setModes(list);
-    // Default persona (★) survives reloads: restore it whenever it still exists.
-    const stored = localStorage.getItem("rag.defaultMode");
-    if (stored && list.some((m) => m.key === stored)) {
-      setChatMode(stored);
-    } else if (!list.some((m) => m.key === chatMode)) {
-      setChatMode(list[0]?.key || "general");
-    }
+    const stored = localStorage.getItem("rag.chatMode") || localStorage.getItem("rag.defaultMode");
+    const next = stored && list.some((m) => m.key === stored)
+      ? stored
+      : list.some((m) => m.key === chatMode)
+        ? chatMode
+        : list[0]?.key || "general";
+    setChatMode(next);
+    localStorage.setItem("rag.chatMode", next);
     return list;
   }
 
@@ -1750,13 +1759,16 @@ function App() {
   }
 
   async function addPersona(template) {
+    if (modes.length >= 10) { window.alert("모드는 최대 10개까지 만들 수 있습니다."); return; }
     try {
-      await fetchJson("/api/modes", {
+      const list = await fetchJson("/api/modes", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(template)
       });
-      await loadModes();
+      setModes(list);
+      selectChatMode(template.key);
+      setPersonaMenuOpen(false);
       setStatus(`페르소나 추가됨: ${template.label}`);
     } catch (e) {
       window.alert(`페르소나 추가 오류: ${e.message}`);
@@ -1782,6 +1794,7 @@ function App() {
   }
 
   function startEditMode(m) {
+    setPersonaMenuOpen(false);
     setEditingMode({
       key: m.key,
       label: m.label,
@@ -1793,6 +1806,7 @@ function App() {
 
   function startNewMode() {
     if (modes.length >= 10) { window.alert("모드는 최대 10개까지 만들 수 있습니다."); return; }
+    setPersonaMenuOpen(false);
     setEditingMode({ key: "", label: "", hint: "", aliases: "", system: "" });
   }
 
@@ -1801,29 +1815,36 @@ function App() {
   }
 
   async function saveMode() {
-    if (!editingMode.label.trim() || !editingMode.system.trim()) {
+    const draft = editingMode;
+    if (!draft?.label?.trim() || !draft?.system?.trim()) {
       window.alert("이름과 지시문(시스템 프롬프트)을 입력하세요.");
       return;
     }
     try {
-      await fetchJson("/api/modes", {
+      const list = await fetchJson("/api/modes", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(editingMode)
+        body: JSON.stringify(draft)
       });
+      setModes(list);
+      const saved = list.find((m) => m.key === draft.key) || list.find((m) => m.label === draft.label.trim()) || list[0];
+      if (saved) selectChatMode(saved.key);
       setEditingMode(null);
-      await loadModes();
-      setStatus("모드 저장됨");
+      setStatus("페르소나 저장됨");
     } catch (e) {
-      window.alert(`모드 저장 오류: ${e.message}`);
+      window.alert(`페르소나 저장 오류: ${e.message}`);
     }
   }
 
   async function deleteMode(key) {
-    if (!window.confirm("이 모드를 삭제할까요?")) return;
+    if (!key) return;
+    if (!window.confirm("이 페르소나를 삭제할까요?")) return;
     try {
-      await fetchJson(`/api/modes/${encodeURIComponent(key)}`, { method: "DELETE" });
-      await loadModes();
+      const list = await fetchJson(`/api/modes/${encodeURIComponent(key)}`, { method: "DELETE" });
+      setModes(list);
+      if (chatMode === key) selectChatMode(list[0]?.key || "general");
+      setEditingMode(null);
+      setStatus("페르소나 삭제됨");
     } catch (e) {
       window.alert(`삭제 오류: ${e.message}`);
     }
@@ -2557,6 +2578,35 @@ function App() {
         </div>
       )}
 
+      {/* Persona edit modal — open via mode-chip double-click or ＋ menu */}
+      {editingMode && (
+        <div className="modal-overlay" onClick={() => setEditingMode(null)}>
+          <div className="modal persona-edit-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>{editingMode.key ? "페르소나 편집" : "새 페르소나"}</h2>
+              <button className="icon-button" type="button" onClick={() => setEditingMode(null)}><X size={18} /></button>
+            </div>
+            <div className="settings-section settings-grid persona-edit-grid">
+              <label>이름<input value={editingMode.label} onChange={(e) => setModeField("label", e.target.value)} placeholder="예: 요약" /></label>
+              <label>힌트<input value={editingMode.hint} onChange={(e) => setModeField("hint", e.target.value)} placeholder="이 페르소나가 하는 일" /></label>
+              <label>별칭 <span className="optional">(쉼표로 구분, 선택)</span><input value={editingMode.aliases} onChange={(e) => setModeField("aliases", e.target.value)} placeholder="summary, 요약" /></label>
+              <label>지시문 (시스템 프롬프트)<textarea value={editingMode.system} onChange={(e) => setModeField("system", e.target.value)} placeholder="이 페르소나에서 LLM이 따를 지시. 답변은 한국어로 등." /></label>
+            </div>
+            <div className="modal-footer persona-edit-footer">
+              <div>
+                {editingMode.key && (
+                  <button type="button" className="secondary danger" onClick={() => deleteMode(editingMode.key)} disabled={modes.length <= 1}>삭제</button>
+                )}
+              </div>
+              <div className="persona-edit-actions">
+                <button type="button" className="secondary" onClick={() => setEditingMode(null)}>취소</button>
+                <button type="button" onClick={saveMode}>저장</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* "내 PC에 설치" — complete local package guide (LM Studio + ARK) */}
       {installOpen && (
         <div className="modal-overlay" onClick={() => setInstallOpen(false)}>
@@ -2852,33 +2902,6 @@ function App() {
                 ) : (
                   <p className="empty tiny">발행된 중앙 에이전트가 없습니다.</p>
                 )
-              )}
-            </div>
-
-            <div className="settings-section">
-              <h3>대화 모드 <span className="optional">({modes.length}/10 · 프롬프트 위 칩)</span></h3>
-              {!editingMode ? (
-                <>
-                  {modes.map((m) => (
-                    <div key={m.key} className="skill-row">
-                      <div className="skill-meta"><strong>{m.label}</strong><span>{m.hint}</span></div>
-                      <button className="mini" type="button" title="편집" onClick={() => startEditMode(m)}><Pencil size={13} /></button>
-                      <button className="mini danger" type="button" title="삭제" onClick={() => deleteMode(m.key)} disabled={modes.length <= 1}><Trash2 size={13} /></button>
-                    </div>
-                  ))}
-                  <button type="button" className="secondary mini-btn" style={{ marginTop: 10 }} onClick={startNewMode} disabled={modes.length >= 10}>+ 모드 추가</button>
-                </>
-              ) : (
-                <div className="settings-grid">
-                  <label>이름<input value={editingMode.label} onChange={(e) => setModeField("label", e.target.value)} placeholder="예: 요약" /></label>
-                  <label>설명(힌트)<input value={editingMode.hint} onChange={(e) => setModeField("hint", e.target.value)} placeholder="이 모드가 하는 일" /></label>
-                  <label>별칭 <span className="optional">(쉼표로 구분, 선택)</span><input value={editingMode.aliases} onChange={(e) => setModeField("aliases", e.target.value)} placeholder="summary, 요약" /></label>
-                  <label>지시문 (시스템 프롬프트)<textarea value={editingMode.system} onChange={(e) => setModeField("system", e.target.value)} style={{ minHeight: 130 }} placeholder="이 모드에서 LLM이 따를 지시. 답변은 한국어로 등." /></label>
-                  <div className="mode-edit-actions">
-                    <button type="button" className="secondary" onClick={() => setEditingMode(null)}>취소</button>
-                    <button type="button" onClick={saveMode} disabled={!editingMode.label.trim() || !editingMode.system.trim()}>저장</button>
-                  </div>
-                </div>
               )}
             </div>
 
@@ -3242,24 +3265,70 @@ function App() {
             />
 
             <div className="chat-input-bar">
-              {modes.length > 0 && (
-                <div className="mode-bar" role="tablist" aria-label="모드">
-                  {modes.map((mo) => (
-                    <button
-                      key={mo.key}
-                      type="button"
-                      role="tab"
-                      aria-selected={mo.key === chatMode}
-                      className={`mode-chip ${mo.key === chatMode ? "active" : ""}`}
-                      title={mo.hint}
-                      onClick={() => setChatMode(mo.key)}
-                    >
-                      {mo.label}
-                    </button>
-                  ))}
-                  {activeMode && <span className="mode-hint">{activeMode.hint}</span>}
+              <div className="mode-bar" role="tablist" aria-label="모드">
+                {modes.map((mo) => (
+                  <button
+                    key={mo.key}
+                    type="button"
+                    role="tab"
+                    aria-selected={mo.key === chatMode}
+                    className={`mode-chip ${mo.key === chatMode ? "active" : ""}`}
+                    title={mo.hint ? `${mo.hint} · 더블클릭하면 편집` : "더블클릭하면 편집"}
+                    onClick={() => selectChatMode(mo.key)}
+                    onDoubleClick={() => startEditMode(mo)}
+                  >
+                    {mo.label}
+                  </button>
+                ))}
+                {activeMode && <span className="mode-hint">{activeMode.hint}</span>}
+                <div className="persona-add-wrap" onClick={(e) => e.stopPropagation()}>
+                  <button
+                    type="button"
+                    className="persona-add-btn"
+                    title="스킬 실행 (직전 답변 가공)"
+                    aria-label="스킬"
+                    onClick={() => { setPersonaMenuOpen(false); setSkillMenuOpen((o) => !o); }}
+                  >
+                    <Sparkles size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    className="persona-add-btn"
+                    title="페르소나 추가"
+                    aria-label="페르소나 추가"
+                    onClick={() => { setSkillMenuOpen(false); setPersonaMenuOpen((o) => !o); }}
+                  >
+                    <Plus size={15} />
+                  </button>
+                  {skillMenuOpen && (
+                    <div className="persona-menu skill-picker-menu">
+                      {skills.length ? skills.map((skill) => (
+                        <button key={skill.name} type="button" onClick={() => { setSkillMenuOpen(false); void runSkill(skill); }}>
+                          <strong>{skill.name}</strong>
+                          <span>{skill.description || "스킬"}</span>
+                        </button>
+                      )) : <p className="empty tiny">설치된 스킬 없음 · 설정 &gt; 스킬</p>}
+                    </div>
+                  )}
+                  {personaMenuOpen && (
+                    <div className="persona-menu">
+                      <button type="button" onClick={startNewMode}>
+                        <strong>새 페르소나</strong>
+                        <span>커스텀 페르소나 만들기</span>
+                      </button>
+                      {PERSONA_TEMPLATES.filter((t) => !modes.some((m) => m.key === t.key)).map((t) => (
+                        <button key={t.key} type="button" disabled={modes.length >= 10} onClick={() => { setPersonaMenuOpen(false); addPersona(t); }}>
+                          <strong>{t.label}</strong>
+                          <span>{t.hint}</span>
+                        </button>
+                      ))}
+                      {PERSONA_TEMPLATES.every((t) => modes.some((m) => m.key === t.key)) && (
+                        <p className="empty tiny">{modes.length >= 10 ? "모드는 최대 10개입니다." : "템플릿을 모두 추가했습니다."}</p>
+                      )}
+                    </div>
+                  )}
                 </div>
-              )}
+              </div>
               <div className="composer">
                 {suggest && (
                   <div className="mention-pop">
@@ -3318,57 +3387,6 @@ function App() {
                   />
                 </div>
                 <div className="composer-bar">
-                  <div className="input-tools" onClick={(e) => e.stopPropagation()}>
-                    <div className="composer-menu-wrap">
-                      <button
-                        type="button"
-                        className="tool"
-                        title="스킬 실행 (직전 답변 가공)"
-                        aria-label="스킬"
-                        onClick={(e) => { e.stopPropagation(); setPersonaMenuOpen(false); setSkillMenuOpen((o) => !o); }}
-                      >
-                        <Sparkles size={16} />
-                      </button>
-                      {skillMenuOpen && (
-                        <div className="composer-menu">
-                          {skills.length ? skills.map((skill) => (
-                            <button key={skill.name} type="button" onClick={() => { setSkillMenuOpen(false); void runSkill(skill); }}>
-                              <strong>{skill.name}</strong>
-                              <span>{skill.description || "스킬"}</span>
-                            </button>
-                          )) : <p className="empty tiny">설치된 스킬 없음 · 설정 &gt; 스킬</p>}
-                        </div>
-                      )}
-                    </div>
-                    <div className="composer-menu-wrap">
-                      <button
-                        type="button"
-                        className="tool"
-                        title="페르소나 추가"
-                        aria-label="페르소나 추가"
-                        onClick={(e) => { e.stopPropagation(); setSkillMenuOpen(false); setPersonaMenuOpen((o) => !o); }}
-                      >
-                        <Plus size={16} />
-                      </button>
-                      {personaMenuOpen && (
-                        <div className="composer-menu">
-                          <button type="button" onClick={() => { setPersonaMenuOpen(false); setSettingsOpen(true); startNewMode(); }}>
-                            <strong>새 페르소나</strong>
-                            <span>커스텀 페르소나 만들기</span>
-                          </button>
-                          {PERSONA_TEMPLATES.filter((t) => !modes.some((m) => m.key === t.key)).map((t) => (
-                            <button key={t.key} type="button" disabled={modes.length >= 10} onClick={() => { setPersonaMenuOpen(false); addPersona(t); }}>
-                              <strong>{t.label}</strong>
-                              <span>{t.hint}</span>
-                            </button>
-                          ))}
-                          {PERSONA_TEMPLATES.every((t) => modes.some((m) => m.key === t.key)) && (
-                            <p className="empty tiny">{modes.length >= 10 ? "모드는 최대 10개입니다." : "템플릿을 모두 추가했습니다."}</p>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
                   <button type="button" onClick={runChat} disabled={busy || (!query.trim() && !attachments.length)} aria-label="전송" className="send-btn">
                     <Send size={18} />
                   </button>

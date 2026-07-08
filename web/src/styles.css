@@ -750,6 +750,7 @@ input:focus, select:focus, textarea:focus {
 }
 
 .mode-bar {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -894,51 +895,117 @@ input:focus, select:focus, textarea:focus {
 .composer-bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   padding: 4px 8px 8px;
 }
 
-.input-tools {
+.tool-sep { width: 1px; align-self: stretch; margin: 6px 4px; background: var(--line); }
+
+/* Composer quick menus (skills ✨ + persona ＋) — mode-bar top-right, company layout */
+.persona-add-wrap {
+  position: relative;
   display: flex;
-  gap: 2px;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
-.input-tools .tool {
-  width: 34px;
-  height: 34px;
-  min-height: 34px;
+.persona-add-btn {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
   padding: 0;
-  border-radius: 8px;
-  background: transparent;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
   color: var(--muted);
 }
 
-.input-tools .tool:hover { background: var(--bg); color: var(--accent-dark); }
-
-.tool-sep { width: 1px; align-self: stretch; margin: 6px 4px; background: var(--line); }
-
-.input-tools .tool.toggle.on { color: #fff; background: var(--accent); }
-.input-tools .tool.toggle.on:hover { background: var(--accent-dark); }
-
-/* Composer quick menus (persona +, skills ✨) — dropdown above the input bar */
-.composer-menu-wrap { position: relative; }
-.composer-menu {
-  position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 60;
-  min-width: 220px; max-height: 320px; overflow-y: auto;
-  display: flex; flex-direction: column; gap: 2px; padding: 6px;
-  background: var(--panel, var(--bg)); border: 1px solid var(--border, #2a2a2a);
-  border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.28);
+.persona-add-btn:hover {
+  background: var(--bg);
+  color: var(--accent-dark);
 }
-.composer-menu button {
-  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
-  padding: 8px 10px; border: 0; border-radius: 8px; background: transparent;
-  color: var(--ink, inherit); cursor: pointer; text-align: left; width: 100%;
+
+.persona-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 60;
+  width: min(320px, 82vw);
+  max-height: 360px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
 }
-.composer-menu button:hover:not(:disabled) { background: var(--bg); }
-.composer-menu button:disabled { opacity: 0.45; cursor: not-allowed; }
-.composer-menu button strong { font-size: 0.86rem; font-weight: 600; }
-.composer-menu button span { font-size: 0.76rem; color: var(--muted, #9aa); }
-.composer-menu .empty.tiny { margin: 4px 8px; font-size: 0.78rem; color: var(--muted, #9aa); }
+
+.skill-picker-menu {
+  width: min(340px, 82vw);
+}
+
+.persona-menu button {
+  width: 100%;
+  min-height: 42px;
+  display: grid;
+  gap: 2px;
+  justify-content: stretch;
+  justify-items: start;
+  align-items: start;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.persona-menu button:hover {
+  background: var(--surface-soft);
+}
+
+.persona-menu button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.persona-menu span {
+  width: 100%;
+  text-align: left;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 400;
+}
+
+.persona-menu strong {
+  width: 100%;
+  text-align: left;
+}
+
+.persona-menu .empty.tiny { margin: 4px 8px; font-size: 0.78rem; color: var(--muted); }
+
+.persona-edit-modal {
+  width: min(620px, 94vw);
+}
+
+.persona-edit-grid textarea {
+  min-height: 170px;
+  resize: vertical;
+}
+
+.persona-edit-footer {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.persona-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+button.secondary.danger {
+  background: #f7e0da;
+  color: var(--danger);
+}
 
 .composer .send-btn {
   width: 36px;
@@ -1421,7 +1488,6 @@ input:focus, select:focus, textarea:focus {
 
 .mini-btn { min-height: 30px; height: 30px; padding: 0 12px; font-size: 0.82rem; }
 
-.mode-edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 
 /* ── Compact (docked-beside-Figma) mode ── */
 .shell.compact > .sidebar,
