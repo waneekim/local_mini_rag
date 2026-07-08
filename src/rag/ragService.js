@@ -9,6 +9,7 @@ import { id, nowIso } from "./ids.js";
 import { CHAT_MODES, LlmProvider } from "./llmProvider.js";
 import { extractTextFromImage } from "./vision.js";
 import { imageToDataUrl, structureFromImage, structureFromText } from "./preprocess.js";
+import { captureUrlScreenshot, extractUrlTextFromBrowser } from "../browserCapture.js";
 import { basenameFromRelative, normalizeUploadedFileName, sanitizeFileName } from "./sanitize.js";
 import { chunkDocuments } from "./chunking.js";
 import { bm25Scores, cosineSimilarity, lexicalScore } from "./vectorMath.js";
@@ -1047,7 +1048,17 @@ class RagService {
       throw Object.assign(new Error("유효한 http(s) URL이 필요합니다."), { statusCode: 400 });
     }
 
-    let html;
+    // Fully automatic extraction: try progressively heavier methods and stop at
+    // the first that yields usable text. No mid-flow choices for the user —
+    // plain fetch → headless-browser render (for SSO/JS-only pages) → screenshot
+    // + vision. Each failure is recorded so the final error can explain why.
+    const minText = Number(process.env.RAG_URL_MIN_TEXT || 120);
+    const reasons = [];
+    let text = "";
+    let title = "";
+    let method = "";
+
+    // 1) Plain fetch — fast path for static/public pages.
     try {
       const response = await fetch(url, {
         headers: { "user-agent": "Mozilla/5.0 (compatible; local-mini-rag)" },
@@ -1055,13 +1066,64 @@ class RagService {
         signal: AbortSignal.timeout(Number(process.env.RAG_URL_TIMEOUT_MS || 20_000))
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      html = await response.text();
+      const extracted = htmlToText(await response.text());
+      if (extracted.text && extracted.text.trim().length >= minText) {
+        text = extracted.text;
+        title = extracted.title;
+        method = "fetch";
+      } else {
+        reasons.push(`일반 요청(fetch): 텍스트가 부족합니다 (${(extracted.text || "").trim().length}자) — 로그인/JS 렌더 페이지로 보입니다.`);
+        if (!title) title = extracted.title;
+      }
     } catch (error) {
-      throw Object.assign(new Error(`URL을 가져오지 못했습니다: ${error.message}`), { statusCode: 502 });
+      reasons.push(`일반 요청(fetch): ${error.message}`);
     }
 
-    const { title, text } = htmlToText(html);
-    if (!text) throw Object.assign(new Error("페이지에서 텍스트를 추출하지 못했습니다."), { statusCode: 422 });
+    // 2) Headless-browser render — reaches SSO-gated / JS-rendered pages.
+    if (text.trim().length < minText) {
+      try {
+        const browser = await extractUrlTextFromBrowser(url, { dataDir: this.dataDir });
+        if (browser.text && browser.text.trim().length >= minText) {
+          text = browser.text;
+          title = browser.title || title;
+          method = "browser";
+        } else {
+          reasons.push(`브라우저 렌더: 텍스트가 부족합니다 (${(browser.text || "").trim().length}자).`);
+        }
+      } catch (error) {
+        reasons.push(`브라우저 렌더: ${error.message}`);
+      }
+    }
+
+    // 3) Screenshot + vision — last resort for canvas/image-only pages. Only when
+    // a vision model is configured; the model reconstructs text from the shot.
+    const visionLlm = this.settingsStore?.get()?.llm || {};
+    const hasVision = Boolean(visionLlm.visionModel || process.env.VISION_MODEL);
+    if (text.trim().length < minText && hasVision) {
+      try {
+        const shot = await captureUrlScreenshot(url, { dataDir: this.dataDir });
+        const md = await structureFromImage(shot.image, { llm: visionLlm });
+        if (md && md.trim().length >= minText) {
+          text = md;
+          title = shot.title || title;
+          method = "screenshot-vision";
+        } else {
+          reasons.push(`스크린샷+비전: 추출된 텍스트가 부족합니다 (${(md || "").trim().length}자).`);
+        }
+      } catch (error) {
+        reasons.push(`스크린샷+비전: ${error.message}`);
+      }
+    } else if (text.trim().length < minText && !hasVision) {
+      reasons.push("스크린샷+비전: 비전 모델이 설정되지 않아 건너뜀 (설정에서 비전 모델 지정 시 시도).");
+    }
+
+    if (text.trim().length < minText) {
+      const err = new Error(
+        `URL에서 내용을 자동으로 가져오지 못했습니다.\n\n시도한 방법:\n- ${reasons.join("\n- ")}\n\n` +
+          `수동 방법: 브라우저에서 아래 링크를 직접 열어 본문을 복사한 뒤, "소스 추가 → 텍스트" 탭에 붙여넣으세요.\n${url}`
+      );
+      throw Object.assign(err, { statusCode: 502, reasons, url });
+    }
 
     const at = nowIso();
     const source = {
@@ -1076,7 +1138,7 @@ class RagService {
       pasted_text: text,
       status: "pending",
       error: "",
-      metadata_json: JSON.stringify({ input: "url", url }),
+      metadata_json: JSON.stringify({ input: "url", url, extractMethod: method }),
       content_hash: hashText(text),
       created_at: at,
       updated_at: at,

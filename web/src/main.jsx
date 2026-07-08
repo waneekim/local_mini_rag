@@ -1241,8 +1241,11 @@ function App() {
     try {
       await addUrl(dlgUrl.trim(), dlgTitle.trim(), pid);
     } catch (e) {
-      setStatus(`URL 오류: ${e.message}`);
-      window.alert(`URL을 추가하지 못했습니다: ${e.message}`);
+      // The server auto-tries fetch → browser → screenshot and, on total
+      // failure, returns one guide (reasons + link + manual copy-paste steps).
+      // Surface it as a single system message — no button maze.
+      setStatus("URL 추출 실패");
+      pushSystem(`⚠️ ${e.message}`);
     }
   }
 
