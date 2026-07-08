@@ -244,6 +244,7 @@ function App() {
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const highlightRef = useRef(null);
+  const suggestPopRef = useRef(null);
 
   const activeProfile = useMemo(
     () => profiles.find((p) => p.id === activeProfileId),
@@ -260,12 +261,6 @@ function App() {
   }, [modes]);
 
   const activeMode = useMemo(() => modes.find((m) => m.key === chatMode) || null, [modes, chatMode]);
-
-  const commandList = useMemo(() => {
-    const modeCmds = modes.map((m) => ({ cmd: m.label, desc: `모드 · ${m.hint}` }));
-    const skillCmds = skills.map((s) => ({ cmd: s.name, desc: `스킬 · ${s.description || ""}` }));
-    return [...modeCmds, ...SYSTEM_COMMANDS, ...skillCmds];
-  }, [modes, skills]);
 
   useEffect(() => { boot(); }, []);
 
@@ -291,6 +286,10 @@ function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    suggestPopRef.current?.querySelector(".mention-item.active")?.scrollIntoView({ block: "nearest" });
+  }, [suggest?.index, suggest?.type]);
 
   // When searching, lazy-load every agent's sources so source-name matching works.
   useEffect(() => {
@@ -1135,7 +1134,7 @@ function App() {
       e.preventDefault();
       setChatDragOver(false);
       const reader = new FileReader();
-      reader.onload = () => extractFromImage(reader.result);
+      reader.onload = () => attachImage(reader.result);
       reader.readAsDataURL(images[0]);
       return;
     }
@@ -1219,14 +1218,163 @@ function App() {
     setMessages((prev) => [...prev, { id: `sys-${Date.now()}-${Math.random()}`, role: "system", content }]);
   }
 
-  function resolveSources(token, pid) {
-    const sources = sourcesByProfile[pid] || [];
-    const lower = token.toLowerCase();
-    const exact = sources.filter((s) => s.title === token || s.relative_path === token);
-    if (exact.length) return exact;
-    return sources.filter(
-      (s) => s.title.toLowerCase().includes(lower) || (s.relative_path || "").toLowerCase().includes(lower)
+  function resolveSources(token, pid, listOverride = null) {
+    const list = listOverride || sourcesByProfile[pid] || [];
+    const raw = String(token || "").trim();
+    const lower = raw.toLowerCase();
+    if (!lower) return [];
+    const exact = list.filter((s) =>
+      s.id === raw ||
+      String(s.title || "").toLowerCase() === lower ||
+      String(s.relative_path || "").toLowerCase() === lower
     );
+    if (exact.length) return exact;
+    return list.filter((s) =>
+      String(s.title || "").toLowerCase().includes(lower) ||
+      String(s.relative_path || "").toLowerCase().includes(lower) ||
+      String(s.file_name || "").toLowerCase().includes(lower)
+    );
+  }
+
+  function sourceLabel(source) {
+    return source.relative_path && source.relative_path !== source.title ? source.relative_path : source.title;
+  }
+
+  function quoteSelector(value) {
+    return '"' + String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+  }
+
+  function findModeByToken(token) {
+    const value = String(token || "").trim().toLowerCase();
+    if (!value) return null;
+    return modes.find((m) =>
+      m.key.toLowerCase() === value ||
+      m.label.toLowerCase() === value ||
+      (m.aliases || []).some((a) => String(a).toLowerCase() === value)
+    ) || modes.find((m) =>
+      m.label.toLowerCase().includes(value) ||
+      (m.aliases || []).some((a) => String(a).toLowerCase().includes(value))
+    ) || null;
+  }
+
+  async function getProfileSources(pid) {
+    return sourcesByProfile[pid] || (await loadSources(pid));
+  }
+
+  // Read one source selector after ":" — either a "quoted name" (spaces ok,
+  // \" escapes) or a bare token up to the next whitespace.
+  function readSelectorToken(raw) {
+    const original = String(raw || "");
+    const input = original.trimStart();
+    const offset = original.length - input.length;
+    if (!input) return { token: "", length: offset };
+    if (input.startsWith('"')) {
+      let escaped = false;
+      let out = "";
+      for (let i = 1; i < input.length; i += 1) {
+        const ch = input[i];
+        if (escaped) { out += ch; escaped = false; continue; }
+        if (ch === "\\") { escaped = true; continue; }
+        if (ch === '"') return { token: out, length: offset + i + 1 };
+        out += ch;
+      }
+      return { token: out, length: offset + input.length };
+    }
+    const match = input.match(/^\S+/);
+    return { token: match?.[0] || "", length: offset + (match?.[0]?.length || 0) };
+  }
+
+  // "@Agent:query" (any agent) or a bare ":query" (active agent) at the end of
+  // the composer — drives the source-scoping suggest popup.
+  function findAgentSourceTrigger(value) {
+    const text = String(value || "");
+    const sorted = [...profiles].sort((a, b) => b.name.length - a.name.length);
+    const lower = text.toLowerCase();
+    for (const profile of sorted) {
+      const tag = "@" + profile.name;
+      const idx = lower.lastIndexOf(tag.toLowerCase());
+      if (idx === -1) continue;
+      const before = idx > 0 ? text[idx - 1] : "";
+      if (before && !/\s/.test(before)) continue;
+      const after = text.slice(idx + tag.length);
+      const match = after.match(/^\s*:([^\n]*)$/);
+      if (!match) continue;
+      return { profile, query: match[1].replace(/^"/, "").toLowerCase(), start: idx, end: text.length, agentScoped: true };
+    }
+    const bare = text.match(/(^|\s):([^\s\n]*)$/);
+    const profile = activeProfile || profiles.find((item) => item.id === activeProfileId) || null;
+    if (bare && profile) {
+      const colon = text.lastIndexOf(":");
+      return { profile, query: bare[2].replace(/^"/, "").toLowerCase(), start: colon, end: text.length, agentScoped: false };
+    }
+    return null;
+  }
+
+  // Company composer parser: pull "@Agent" and an optional :"source" selector
+  // out of the prompt, resolving the target profile/source ids.
+  async function parseChatTarget(textValue) {
+    const text = String(textValue || "");
+    const sorted = [...profiles].sort((a, b) => b.name.length - a.name.length);
+    const lower = text.toLowerCase();
+    for (const profile of sorted) {
+      const tag = "@" + profile.name;
+      const idx = lower.indexOf(tag.toLowerCase());
+      if (idx === -1) continue;
+      const before = idx > 0 ? text[idx - 1] : "";
+      if (before && !/\s/.test(before)) continue;
+      const afterIdx = idx + tag.length;
+      const after = text.slice(afterIdx);
+      if (after && !/^[\s:]/.test(after)) continue;
+      let removeEnd = afterIdx;
+      let sourceIds = [];
+      let sourceName = "";
+      let sourceMissing = "";
+      const colonMatch = after.match(/^\s*:/);
+      if (colonMatch) {
+        const parsed = readSelectorToken(after.slice(colonMatch[0].length));
+        removeEnd = afterIdx + colonMatch[0].length + parsed.length;
+        if (parsed.token) {
+          const list = await getProfileSources(profile.id);
+          const matches = resolveSources(parsed.token, profile.id, list);
+          if (matches.length) {
+            sourceIds = [matches[0].id];
+            sourceName = sourceLabel(matches[0]);
+          } else {
+            sourceMissing = parsed.token;
+          }
+        }
+      }
+      const cleanText = (text.slice(0, idx) + text.slice(removeEnd)).replace(/\s+/g, " ").trim();
+      return { profileId: profile.id, agentName: profile.name, sourceIds, sourceName, sourceMissing, cleanText };
+    }
+
+    const profile = activeProfile || profiles.find((item) => item.id === activeProfileId) || null;
+    if (profile) {
+      const bare = /(^|\s):/.exec(text);
+      if (bare) {
+        const colonIdx = bare.index + bare[1].length;
+        const parsed = readSelectorToken(text.slice(colonIdx + 1));
+        if (parsed.token) {
+          const list = await getProfileSources(profile.id);
+          const matches = resolveSources(parsed.token, profile.id, list);
+          const removeEnd = colonIdx + 1 + parsed.length;
+          const cleanText = (text.slice(0, colonIdx) + text.slice(removeEnd)).replace(/\s+/g, " ").trim();
+          if (matches.length) {
+            return { profileId: profile.id, agentName: profile.name, sourceIds: [matches[0].id], sourceName: sourceLabel(matches[0]), sourceMissing: "", cleanText };
+          }
+          return { profileId: profile.id, agentName: profile.name, sourceIds: [], sourceName: "", sourceMissing: parsed.token, cleanText };
+        }
+      }
+    }
+    return { profileId: "", agentName: "", sourceIds: [], sourceName: "", sourceMissing: "", cleanText: text };
+  }
+
+  async function selectAgentFromCommand(profile) {
+    if (!profile) return;
+    setActiveProfileId(profile.id);
+    setExpandedIds(new Set([profile.id]));
+    await loadSources(profile.id);
+    pushSystem(`${profile.name} Agent를 선택했습니다.`);
   }
 
   function formatSourceList(label, list) {
@@ -1432,31 +1580,23 @@ function App() {
     }
   }
 
-  function parseMention(text) {
-    for (const p of profiles) {
-      const tag = `@${p.name}`;
-      const idx = text.toLowerCase().indexOf(tag.toLowerCase());
-      if (idx !== -1) {
-        let after = text.slice(idx + tag.length);
-        let sourceIds = [];
-        let sourceName = "";
-        // @Agent:source — scope retrieval to a single source of that agent.
-        // The name may be quoted ("...") when it contains spaces.
-        const sm = after.match(/^:("[^"]+"|\S+)/);
-        if (sm) {
-          sourceName = sm[1].replace(/^"|"$/g, "");
-          after = after.slice(sm[0].length);
-          const srcs = sourcesByProfile[p.id] || [];
-          const label = (s) => String(s.title || s.relative_path || s.file_name || "").toLowerCase();
-          const q = sourceName.toLowerCase();
-          const match = srcs.find((s) => label(s) === q) || srcs.find((s) => label(s).includes(q));
-          if (match) sourceIds = [match.id];
-        }
-        const cleanText = (text.slice(0, idx) + after).replace(/\s+/g, " ").trim();
-        return { profileId: p.id, agentName: p.name, cleanText, sourceIds, sourceName };
-      }
+  // "/persona [질문]" — company grammar: "/" is persona-first. Tokens that are
+  // not a persona fall back to the system-command dispatcher so our own
+  // commands (/add, /embed-list, …) keep working.
+  async function handlePersonaCommand(text) {
+    const m = text.match(/^\/(\S+)\s*([\s\S]*)$/);
+    if (!m) return;
+    const mode = findModeByToken(m[1]);
+    if (!mode) { await handleCommand(text); return; }
+    selectChatMode(mode.key);
+    const rest = m[2].trim();
+    if (rest) {
+      const target = await parseChatTarget(rest);
+      if (target.sourceMissing) { pushSystem(`소스를 찾을 수 없습니다: ${target.sourceMissing}`); return; }
+      await sendMessage(target.cleanText || rest, mode.key, target.profileId || activeProfileId, target.agentName, [], target.sourceIds, target.sourceName);
+    } else {
+      pushSystem(`${mode.label} 페르소나로 전환했습니다.${mode.hint ? ` ${mode.hint}` : ""}`);
     }
-    return { profileId: "", agentName: "", cleanText: text, sourceIds: [], sourceName: "" };
   }
 
   // $skill sigil — run an installed skill by name (or list them). Skills-only,
@@ -1482,7 +1622,7 @@ function App() {
     // Split composer grammar: /persona · $skill · !command · @Agent(:source).
     if (text.startsWith("/")) {
       setQuery(""); setSuggest(null);
-      await handleCommand(text);
+      await handlePersonaCommand(text);
       return;
     }
     if (text.startsWith("$")) {
@@ -1497,14 +1637,29 @@ function App() {
       await handleCommand(body ? `/${body}` : "/help");
       return;
     }
-    const { profileId, agentName, cleanText, sourceIds, sourceName } = parseMention(text);
-    const targetId = profileId || activeProfileId;
+    const target = await parseChatTarget(text);
+    if (target.sourceMissing) { pushSystem(`소스를 찾을 수 없습니다: ${target.sourceMissing}`); return; }
+    const targetId = target.profileId || activeProfileId;
     if (!targetId) return;
+    // A bare "@Agent" selects that agent (company behavior).
+    if (target.profileId && !target.cleanText && !attachments.length && !target.sourceIds.length) {
+      await selectAgentFromCommand(profiles.find((p) => p.id === target.profileId));
+      setQuery("");
+      setSuggest(null);
+      return;
+    }
+    // "@Agent:소스"만 입력 — keep the selector in the composer and prompt for a question.
+    if (target.profileId && target.sourceIds.length && !target.cleanText && !attachments.length) {
+      setQuery(`@${target.agentName}:${quoteSelector(target.sourceName)} `);
+      setSuggest(null);
+      pushSystem(`${target.agentName} › ${target.sourceName} 선택됨. 이 소스만으로 대화하려면 이어서 질문을 입력하세요.`);
+      return;
+    }
     const images = attachments;
     setQuery("");
     setAttachments([]);
     setSuggest(null);
-    await sendMessage(cleanText || text, chatMode, targetId, agentName, images, sourceIds, sourceName);
+    await sendMessage(target.cleanText || text, chatMode, targetId, target.agentName, images, target.sourceIds, target.sourceName);
   }
 
   async function sendMessage(text, mode, targetId = activeProfileId, agentName = "", images = [], sourceIds = [], sourceName = "") {
@@ -1558,44 +1713,41 @@ function App() {
     }
   }
 
-  function onQueryChange(e) {
+  async function onQueryChange(e) {
     const val = e.target.value;
     setQuery(val);
-    // @Agent:source — suggest that agent's sources after the colon.
-    const atSource = val.match(/@([^\s@:]+):([^\s@]*)$/);
-    if (atSource) {
-      const agent = profiles.find((p) => p.name.toLowerCase() === atSource[1].toLowerCase());
-      if (agent) {
-        const q = atSource[2].toLowerCase();
-        const items = (sourcesByProfile[agent.id] || [])
-          .filter((s) => !q || String(s.title || s.relative_path || s.file_name || "").toLowerCase().includes(q))
-          .slice(0, 6);
-        setSuggest(items.length ? { type: "source", agent, items, index: 0 } : null);
-        return;
-      }
-    }
-    const at = val.match(/@([^\s@:]*)$/);
-    if (at) {
-      const q = at[1].toLowerCase();
-      const items = profiles.filter((p) => p.name.toLowerCase().includes(q)).slice(0, 6);
-      setSuggest(items.length ? { type: "mention", items, index: 0 } : null);
+    // "@Agent:…" or a bare ":…" — suggest that agent's sources (company grammar).
+    const sourceTrigger = findAgentSourceTrigger(val);
+    if (sourceTrigger) {
+      const list = await getProfileSources(sourceTrigger.profile.id);
+      const q = sourceTrigger.query.replace(/"$/, "");
+      const items = list
+        .filter((src) => !q || sourceLabel(src).toLowerCase().includes(q) || String(src.title || "").toLowerCase().includes(q));
+      setSuggest(items.length ? { type: "source", profile: sourceTrigger.profile, items, index: 0 } : null);
       return;
     }
+    const agentMatch = val.match(/@([^@:\n]*)$/);
+    if (agentMatch) {
+      const q = agentMatch[1].trim().toLowerCase();
+      const items = profiles.filter((profile) => !q || profile.name.toLowerCase().includes(q)).slice(0, 8);
+      setSuggest(items.length ? { type: "agent", items, index: 0 } : null);
+      return;
+    }
+    // "/" — personas only (company grammar; system commands live under "!").
     const slash = val.match(/^\/([^\s]*)$/);
     if (slash) {
       const q = slash[1].toLowerCase();
-      const items = commandList.filter((c) => c.cmd.toLowerCase().includes(q)).slice(0, 8);
-      setSuggest(items.length ? { type: "command", items, index: 0 } : null);
+      const items = modes.filter((mode) =>
+        !q || mode.label.toLowerCase().includes(q) || mode.key.toLowerCase().includes(q) || (mode.aliases || []).some((alias) => String(alias).toLowerCase().includes(q))
+      ).slice(0, 8);
+      setSuggest(items.length ? { type: "persona", items, index: 0 } : null);
       return;
     }
     // $skill — installed skills only.
     const dollar = val.match(/^\$([^\s]*)$/);
     if (dollar) {
       const q = dollar[1].toLowerCase();
-      const items = skills
-        .filter((s) => s.name.toLowerCase().includes(q))
-        .map((s) => ({ cmd: s.name, desc: `스킬 · ${s.description || ""}` }))
-        .slice(0, 8);
+      const items = skills.filter((sk) => sk.name.toLowerCase().includes(q) || sk.folder?.toLowerCase().includes(q)).slice(0, 8);
       setSuggest(items.length ? { type: "skill", items, index: 0 } : null);
       return;
     }
@@ -1610,19 +1762,49 @@ function App() {
     setSuggest(null);
   }
 
-  function pickSuggest(item) {
-    if (suggest?.type === "mention") {
-      setQuery((val) => val.replace(/@([^\s@:]*)$/, `@${item.name} `));
+  function suggestKey(item) {
+    if (suggest?.type === "agent" || suggest?.type === "source") return item.id;
+    if (suggest?.type === "persona") return item.key;
+    if (suggest?.type === "skill") return item.name;
+    return item.cmd;
+  }
+
+  function renderSuggestItem(item) {
+    if (suggest?.type === "agent") return <><Bot size={13} /><span>{item.name}</span></>;
+    if (suggest?.type === "source") return <><FileText size={13} /><span>{sourceLabel(item)}</span><span className="sug-desc">{statusLabel(item.status)}</span></>;
+    if (suggest?.type === "persona") return <><span className="sug-cmd">/{item.label}</span><span className="sug-desc">{item.hint}</span></>;
+    if (suggest?.type === "skill") return <><Sparkles size={13} /><span className="sug-cmd">{`$${item.name}`}</span><span className="sug-desc">{item.description || "스킬"}</span></>;
+    if (suggest?.type === "system") return <><Settings size={13} /><span className="sug-cmd">!{item.cmd}</span><span className="sug-desc">{item.desc}</span></>;
+    return String(item?.cmd || item?.name || item?.label || "");
+  }
+
+  async function pickSuggest(item) {
+    if (suggest?.type === "persona") {
+      selectChatMode(item.key);
+      setQuery("");
+      pushSystem(`${item.label} 페르소나로 전환했습니다.${item.hint ? ` ${item.hint}` : ""}`);
+    } else if (suggest?.type === "agent") {
+      const exact = query.trim().toLowerCase() === `@${item.name}`.toLowerCase();
+      if (exact) {
+        await selectAgentFromCommand(item);
+        setQuery("");
+      } else {
+        setQuery((val) => val.replace(/@([^@:\n]*)$/, `@${item.name} `));
+      }
     } else if (suggest?.type === "source") {
-      const label = item.title || item.relative_path || item.file_name || "";
-      const quoted = /\s/.test(label) ? `"${label}"` : label;
-      setQuery((val) => val.replace(/(@[^\s@:]+:)[^\s@]*$/, `$1${quoted} `));
+      setQuery((val) => {
+        const trigger = findAgentSourceTrigger(val);
+        if (!trigger) return val;
+        const selector = trigger.agentScoped
+          ? `@${suggest.profile.name}:${quoteSelector(sourceLabel(item))}`
+          : `:${quoteSelector(sourceLabel(item))}`;
+        return val.slice(0, trigger.start) + selector + " ";
+      });
     } else if (suggest?.type === "skill") {
-      setQuery(`$${item.cmd} `);
+      setQuery("");
+      runSkill(item);
     } else if (suggest?.type === "system") {
       setQuery(`!${item.cmd} `);
-    } else {
-      setQuery(`/${item.cmd} `);
     }
     setSuggest(null);
     setTimeout(() => inputRef.current?.focus(), 0);
@@ -3193,6 +3375,7 @@ function App() {
                       {msg.role === "user" && msg.modeLabel && msg.mode !== "general" && (
                         <span className="bubble-mode">{msg.modeLabel}</span>
                       )}
+                      {msg.role === "user" && msg.sourceName && <span className="bubble-source">{msg.sourceName}</span>}
                       {msg.role === "user" && msg.images?.length ? (
                         <div className="bubble-images">
                           {msg.images.map((src, i) => (
@@ -3351,25 +3534,16 @@ function App() {
               </div>
               <div className="composer">
                 {suggest && (
-                  <div className="mention-pop">
+                  <div ref={suggestPopRef} className={`mention-pop ${suggest.type === "source" ? "source-pop" : ""}`}>
                     {suggest.items.map((item, i) => (
                       <button
-                        key={suggest.type === "mention" || suggest.type === "source" ? item.id : item.cmd}
+                        key={suggestKey(item)}
                         type="button"
                         className={`mention-item ${i === suggest.index ? "active" : ""}`}
                         onMouseEnter={() => setSuggest((s) => (s ? { ...s, index: i } : s))}
                         onMouseDown={(e) => { e.preventDefault(); pickSuggest(item); }}
                       >
-                        {suggest.type === "mention" ? (
-                          <><Bot size={13} />{item.name}</>
-                        ) : suggest.type === "source" ? (
-                          <><FileText size={13} />{item.title || item.relative_path || item.file_name}</>
-                        ) : (
-                          <>
-                            <span className="sug-cmd">{suggest.type === "skill" ? "$" : suggest.type === "system" ? "!" : "/"}{item.cmd}</span>
-                            <span className="sug-desc">{item.desc}</span>
-                          </>
-                        )}
+                        {renderSuggestItem(item)}
                       </button>
                     ))}
                   </div>
@@ -3590,7 +3764,7 @@ function renderInputHighlight(text, profiles) {
   const nodes = [];
   let rest = text;
   let k = 0;
-  const cmd = rest.match(/^\/[^\s]*/);
+  const cmd = rest.match(/^[/$!][^\s]*/);
   if (cmd) {
     nodes.push(<span key={`c${k++}`} className="cmd-pill">{cmd[0]}</span>);
     rest = rest.slice(cmd[0].length);

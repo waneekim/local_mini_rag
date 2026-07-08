@@ -633,6 +633,14 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  max-height: min(360px, 45vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.mention-pop.source-pop {
+  width: min(520px, calc(100vw - 40px));
+  max-width: min(620px, calc(100vw - 40px));
 }
 
 .mention-item {
@@ -860,6 +868,23 @@ input:focus, select:focus, textarea:focus {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.22);
   color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.bubble-source {
+  display: inline-block;
+  max-width: min(360px, 100%);
+  margin-bottom: 5px;
+  margin-right: 5px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
   font-size: 0.7rem;
   font-weight: 700;
 }
