@@ -37,7 +37,11 @@ import {
   X,
   Zap
 } from "lucide-react";
+import { marked } from "marked";
+import DOMPurify from "dompurify";
 import "./styles.css";
+
+marked.setOptions({ gfm: true, breaks: true });
 
 const API = "";
 
@@ -1649,7 +1653,7 @@ function App() {
 
     const popup = window.open("", `source-${citation.sourceId}-${citation.number}`, "width=700,height=800,resizable=yes,scrollbars=yes");
     if (!popup) return;
-    const body = highlightTerms(escapeHtml(citation.text || citation.excerpt || ""), citation.query || "");
+    const body = renderPopupMarkdown(citation.text || citation.excerpt || "", citation.query || "");
     const html = `<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <title>[${citation.number}] ${escapeHtml(citation.title)}</title>
 <style>
@@ -1663,12 +1667,31 @@ function App() {
   .score { background: #e5f3ef; color: #005e52; padding: 3px 10px; border-radius: 999px; font-size: 0.78rem; font-weight: 700; }
   .num { background: #dde8ff; color: #2946a8; padding: 3px 10px; border-radius: 999px; font-size: 0.78rem; font-weight: 700; }
   .hl-note { color: #68736d; font-size: 0.76rem; }
-  .excerpt { white-space: pre-wrap; line-height: 1.75; font-size: 0.93rem; background: white; border: 1px solid #d9e0dc; border-radius: 8px; padding: 18px; }
+  .excerpt { line-height: 1.7; font-size: 0.93rem; background: white; border: 1px solid #d9e0dc; border-radius: 8px; padding: 18px; overflow-x: auto; }
+  .markdown-body { white-space: normal; }
+  .markdown-body > *:first-child { margin-top: 0; }
+  .markdown-body > *:last-child { margin-bottom: 0; }
+  .markdown-body p { margin: 0 0 0.7em; }
+  .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 { margin: 1em 0 0.45em; line-height: 1.3; font-weight: 700; }
+  .markdown-body h1 { font-size: 1.35rem; }
+  .markdown-body h2 { font-size: 1.2rem; }
+  .markdown-body h3 { font-size: 1.08rem; }
+  .markdown-body h4 { font-size: 1rem; }
+  .markdown-body ul, .markdown-body ol { margin: 0.35em 0 0.75em; padding-left: 1.45em; }
+  .markdown-body li { margin: 0.16em 0; }
+  .markdown-body code { background: #eef3f0; border-radius: 4px; padding: 0.08em 0.34em; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.88em; }
+  .markdown-body pre { background: #17211d; color: #f7faf8; border-radius: 8px; padding: 12px; overflow-x: auto; margin: 0.75em 0; }
+  .markdown-body pre code { background: transparent; padding: 0; color: inherit; }
+  .markdown-body blockquote { margin: 0.75em 0; padding: 0.1em 0 0.1em 0.9em; border-left: 3px solid #b7c9c2; color: #4e5a54; }
+  .markdown-body table { border-collapse: collapse; width: max-content; max-width: 100%; margin: 0.75em 0; font-size: 0.88rem; }
+  .markdown-body th, .markdown-body td { border: 1px solid #d9e0dc; padding: 6px 8px; text-align: left; vertical-align: top; }
+  .markdown-body th { background: #eef3f0; font-weight: 700; }
+  .markdown-body hr { border: 0; border-top: 1px solid #d9e0dc; margin: 1em 0; }
   mark { background: #ffe08a; color: inherit; padding: 0 2px; border-radius: 2px; }
 </style></head><body>
 <div class="header"><h1>${escapeHtml(citation.title)}</h1>${locatorStr ? `<div class="meta">${escapeHtml(locatorStr)}</div>` : ""}</div>
 <div class="body"><div class="score-row"><span class="num">[${citation.number}]</span><span class="score">유사도 ${typeof citation.score === "number" ? citation.score.toFixed(3) : "-"}</span>${citation.query ? '<span class="hl-note">노란 표시 = 질문 키워드</span>' : ""}</div>
-<div class="excerpt">${body}</div></div>
+<div class="excerpt markdown-body">${body}</div></div>
 </body></html>`;
     popup.document.write(html);
     popup.document.close();
@@ -3177,10 +3200,10 @@ function App() {
                           ))}
                         </div>
                       ) : null}
-                      {(msg.content || msg.role === "assistant") && (
-                        <p className="bubble-text">
-                          {msg.role === "assistant" ? renderAnswerText(msg.content, msg.citations, openCitationPopup) : msg.content}
-                        </p>
+                      {msg.role === "assistant" ? (
+                        <MarkdownAnswer text={msg.content} citations={msg.citations} onCitationClick={openCitationPopup} />
+                      ) : (
+                        <p className="bubble-text">{msg.content || (msg.images?.length ? `이미지 ${msg.images.length}장 첨부` : "")}</p>
                       )}
                       {/* Answer meta: interpretation + rule hits in one consistent block */}
                       {msg.role === "assistant" && (msg.concepts?.length || msg.violations?.length) ? (
@@ -3494,30 +3517,43 @@ function traverseEntry(entry, path, out) {
   });
 }
 
-function renderAnswerText(text, citations, onCitationClick) {
-  if (!citations?.length) return text;
-  const parts = String(text).split(/(\[\d+\])/g);
-  return parts.map((part, i) => {
-    const match = part.match(/^\[(\d+)\]$/);
-    if (match) {
-      const citation = citations.find((c) => c.number === parseInt(match[1], 10));
-      if (citation) {
-        const isCard = citation.sourceKind === "concept-cards";
-        return (
-          <button
-            key={i}
-            className={`citation-ref ${isCard ? "card" : ""}`}
-            type="button"
-            title={isCard ? `🧠 정리 카드: ${citation.locator?.concept || citation.title}` : citation.breadcrumb || citation.title}
-            onClick={() => onCitationClick(citation)}
-          >
-            {part}
-          </button>
-        );
-      }
-    }
-    return part;
-  });
+// Render an assistant answer as GitHub-flavored markdown (company parity).
+// Citation tokens like [1] that match a known citation are swapped for
+// clickable buttons after sanitizing — the injected markup is fully controlled
+// (number + escaped title), so it stays safe. Clicks are handled by event
+// delegation on the container. Concept-card citations keep the .card accent.
+function MarkdownAnswer({ text, citations, onCitationClick }) {
+  const citationByNumber = useMemo(() => {
+    const map = new Map();
+    for (const c of citations || []) map.set(c.number, c);
+    return map;
+  }, [citations]);
+
+  const html = useMemo(() => {
+    const rendered = DOMPurify.sanitize(marked.parse(String(text ?? "")));
+    return rendered.replace(/\[(\d+)\]/g, (whole, num) => {
+      const citation = citationByNumber.get(Number(num));
+      if (!citation) return whole;
+      const isCard = citation.sourceKind === "concept-cards";
+      const tip = isCard ? `🧠 정리 카드: ${citation.locator?.concept || citation.title}` : citation.breadcrumb || citation.title;
+      return `<button type="button" class="citation-ref${isCard ? " card" : ""}" data-cite="${num}" title="${escapeHtml(tip)}">${whole}</button>`;
+    });
+  }, [text, citationByNumber]);
+
+  const handleClick = (event) => {
+    const button = event.target.closest(".citation-ref");
+    if (!button) return;
+    const citation = citationByNumber.get(Number(button.dataset.cite));
+    if (citation) onCitationClick(citation);
+  };
+
+  return (
+    <div
+      className="bubble-text markdown-body"
+      onClick={handleClick}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
 }
 
 function escapeHtml(text) {
@@ -3578,20 +3614,63 @@ function renderInputHighlight(text, profiles) {
   return nodes;
 }
 
-// Wrap query keywords (length >= 2) in <mark> within already-escaped text.
-function highlightTerms(escapedText, query) {
+// Citation popup body: markdown → sanitized HTML, then query keywords wrapped
+// in <mark> across text nodes only (tags stay intact).
+function renderPopupMarkdown(markdown, query) {
+  const rendered = DOMPurify.sanitize(marked.parse(String(markdown ?? "")));
+  return highlightTermsInHtml(rendered, query);
+}
+
+function highlightTermsInHtml(html, query) {
   const terms = String(query || "")
     .split(/\s+/)
     .map((t) => t.trim())
     .filter((t) => t.length >= 2)
     .sort((a, b) => b.length - a.length);
-  if (!terms.length) return escapedText;
-  const pattern = terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  if (!terms.length) return html;
+
+  let regex;
   try {
-    return escapedText.replace(new RegExp(`(${pattern})`, "gi"), "<mark>$1</mark>");
+    regex = new RegExp(`(${terms.map(escapeRegExp).join("|")})`, "gi");
   } catch {
-    return escapedText;
+    return html;
   }
+
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+
+  for (const node of nodes) {
+    const value = node.nodeValue || "";
+    regex.lastIndex = 0;
+    if (!regex.test(value)) continue;
+    regex.lastIndex = 0;
+
+    const fragment = document.createDocumentFragment();
+    let lastIndex = 0;
+    value.replace(regex, (match, _group, offset) => {
+      if (offset > lastIndex) {
+        fragment.appendChild(document.createTextNode(value.slice(lastIndex, offset)));
+      }
+      const mark = document.createElement("mark");
+      mark.textContent = match;
+      fragment.appendChild(mark);
+      lastIndex = offset + match.length;
+      return match;
+    });
+    if (lastIndex < value.length) {
+      fragment.appendChild(document.createTextNode(value.slice(lastIndex)));
+    }
+    node.parentNode?.replaceChild(fragment, node);
+  }
+
+  return template.innerHTML;
+}
+
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function fetchJson(url, options = {}) {
