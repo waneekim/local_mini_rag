@@ -1450,7 +1450,7 @@ button.secondary.danger {
 }
 .link-btn:hover { filter: brightness(1.1); }
 
-/* ── Simple settings: quick connect + persona manager ── */
+/* ── Simple settings: quick connect ── */
 .quick-settings-panel {
   display: flex;
   flex-direction: column;
@@ -1473,8 +1473,6 @@ button.secondary.danger {
 .conn-row { padding: 7px 10px; border-radius: 8px; }
 .conn-row.ok { background: rgba(46, 160, 67, 0.14); }
 .conn-row.bad { background: rgba(229, 83, 75, 0.14); }
-.mini.star { font-size: 0.95rem; line-height: 1; }
-.mini.star.on { color: #e8b93c; }
 
 /* ── Review workspace (검수): marked original → rewrite → word verdicts ── */
 .review-workspace { max-width: 720px; }

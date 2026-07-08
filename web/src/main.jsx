@@ -140,7 +140,7 @@ function App() {
   const [activeCitations, setActiveCitations] = useState([]);
   const [busy, setBusy] = useState(false);
   const [modes, setModes] = useState([]);
-  const [chatMode, setChatMode] = useState(() => localStorage.getItem("rag.chatMode") || localStorage.getItem("rag.defaultMode") || "general");
+  const [chatMode, setChatMode] = useState(() => localStorage.getItem("rag.chatMode") || "general");
   const [skills, setSkills] = useState([]);
   const [skillRepo, setSkillRepo] = useState("");
   const [availableSkills, setAvailableSkills] = useState([]);
@@ -196,14 +196,13 @@ function App() {
   const [presetName, setPresetName] = useState("");
   const [settingsForm, setSettingsForm] = useState(null);
   // Simple-first settings: designers see one API-key field; the full form is
-  // behind "고급 설정". Default persona survives reloads via localStorage.
+  // behind "고급 설정".
   const [advancedSettings, setAdvancedSettings] = useState(false);
   const [quickKey, setQuickKey] = useState("");
   const [connTest, setConnTest] = useState(null); // null | {busy:true} | {llm:{ok,detail}, embedding:{ok,detail}}
   const [connBusy, setConnBusy] = useState(false);
   const [gaussModels, setGaussModels] = useState([]);
   const [gaussModelStatus, setGaussModelStatus] = useState("");
-  const [defaultMode, setDefaultMode] = useState(() => localStorage.getItem("rag.defaultMode") || "");
   // "내 PC에 설치" guide: full local package, no API key needed.
   const [installOpen, setInstallOpen] = useState(false);
   // In-app document viewer (double-click a source): shows what the document says.
@@ -1989,8 +1988,8 @@ function App() {
     setSkills(await fetchJson("/api/skills").catch(() => []));
   }
 
-  // Persist the selected persona across reloads (company behavior); the ★
-  // default persona (rag.defaultMode) still wins when nothing was selected.
+  // Persist the selected persona across reloads: the last persona the user
+  // picked becomes the default on the next load (rag.chatMode).
   function selectChatMode(key) {
     const next = key || modes[0]?.key || "general";
     setChatMode(next);
@@ -2000,7 +1999,7 @@ function App() {
   async function loadModes() {
     const list = await fetchJson("/api/modes");
     setModes(list);
-    const stored = localStorage.getItem("rag.chatMode") || localStorage.getItem("rag.defaultMode");
+    const stored = localStorage.getItem("rag.chatMode");
     const next = stored && list.some((m) => m.key === stored)
       ? stored
       : list.some((m) => m.key === chatMode)
@@ -2011,7 +2010,7 @@ function App() {
     return list;
   }
 
-  // ── Simple settings: one-key connect + persona quick manager ──
+  // ── Simple settings: one-key connect ──
 
   async function quickConnect() {
     if (!settingsForm) return;
@@ -2136,17 +2135,6 @@ function App() {
       () => setStatus("복사됨 — 터미널/탐색기에 붙여넣으세요"),
       () => setStatus("복사 실패 — 직접 선택해서 복사하세요")
     );
-  }
-
-  function toggleDefaultPersona(key) {
-    const next = defaultMode === key ? "" : key;
-    setDefaultMode(next);
-    if (next) {
-      localStorage.setItem("rag.defaultMode", next);
-      setChatMode(next);
-    } else {
-      localStorage.removeItem("rag.defaultMode");
-    }
   }
 
   function startEditMode(m) {
@@ -3033,43 +3021,6 @@ function App() {
               <div className="settings-section quick-actions">
                 <button type="button" className="secondary" onClick={() => setAdvancedSettings(true)}>고급 설정</button>
               </div>
-            </div>
-
-            <div hidden={advancedSettings}>
-                <div className="settings-section">
-                  <h3>페르소나 <span className="optional">(대화 모드 · ★=기본)</span></h3>
-                  <p className="skill-group-label">
-                    ★를 누르면 <strong>기본 페르소나</strong>로 저장되어 다음 접속에도 선택되어 있습니다.
-                  </p>
-                  {modes.map((m) => (
-                    <div key={m.key} className="skill-row">
-                      <button
-                        type="button"
-                        className={`mini star ${defaultMode === m.key ? "on" : ""}`}
-                        title={defaultMode === m.key ? "기본 페르소나 해제" : "기본 페르소나로 지정"}
-                        onClick={() => toggleDefaultPersona(m.key)}
-                      >
-                        {defaultMode === m.key ? "★" : "☆"}
-                      </button>
-                      <div className="skill-meta"><strong>{m.label}</strong><span>{m.hint}</span></div>
-                      <button className="mini danger" type="button" title="삭제" onClick={() => deleteMode(m.key)} disabled={modes.length <= 1}>
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
-                  ))}
-                  {PERSONA_TEMPLATES.some((t) => !modes.some((m) => m.key === t.key)) && (
-                    <>
-                      <p className="skill-group-label" style={{ marginTop: 10 }}>추가할 수 있는 페르소나</p>
-                      <div className="examples">
-                        {PERSONA_TEMPLATES.filter((t) => !modes.some((m) => m.key === t.key)).map((t) => (
-                          <button key={t.key} type="button" className="chip" title={t.hint} onClick={() => addPersona(t)} disabled={modes.length >= 10}>
-                            + {t.label}
-                          </button>
-                        ))}
-                      </div>
-                    </>
-                  )}
-                </div>
             </div>
 
             <div hidden={!advancedSettings}>
