@@ -11,3 +11,6 @@ __pycache__/
 .claude/settings.json
 skills/*
 !skills/ux-report/
+
+# 회사 버전(AgentRAGKnowledge) 비교 참조 — 절대 커밋 금지
+.company-ref/
