@@ -204,9 +204,8 @@ function App() {
   const [gaussModels, setGaussModels] = useState([]);
   const [gaussModelStatus, setGaussModelStatus] = useState("");
   const [defaultMode, setDefaultMode] = useState(() => localStorage.getItem("rag.defaultMode") || "");
-  // "내 PC에 설치" guide + offline bundle download (/api/download/*).
+  // "내 PC에 설치" guide: full local package, no API key needed.
   const [installOpen, setInstallOpen] = useState(false);
-  const [downloadInfo, setDownloadInfo] = useState(null);
   // In-app document viewer (double-click a source): shows what the document says.
   const [viewer, setViewer] = useState(null); // { pid, loading, data }
 
@@ -402,7 +401,6 @@ function App() {
     setModes(modePayload);
     setSkills(skillPayload);
     setAdminRequired(Boolean(authPayload.adminRequired));
-    fetchJson("/api/download/info").then(setDownloadInfo).catch(() => {});
     if (authPayload.adminRequired && localStorage.getItem("ark.adminToken")) {
       fetchJson("/api/auth/verify", { method: "POST" })
         .then((r) => setIsAdmin(Boolean(r.ok)))
@@ -2977,44 +2975,42 @@ function App() {
         </div>
       )}
 
-      {/* Install guide + offline package download (company layout) */}
+      {/* "내 PC에 설치" — 우리 원래 다운로드 팝업 구성 (LM Studio 가이드 제외) */}
       {installOpen && (
-        <div className="modal-overlay install-guide-modal" onClick={() => setInstallOpen(false)}>
+        <div className="modal-overlay" onClick={() => setInstallOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h2>내 PC에 설치 가이드</h2>
+              <h2>내 PC에 설치 — 완전 로컬 패키지</h2>
               <button className="icon-button" type="button" onClick={() => setInstallOpen(false)}><X size={18} /></button>
             </div>
-            <div className="settings-section install-step">
-              <h3><span className="step-no">1</span> 로컬 모델 서버</h3>
-              <p className="skill-group-label">LM Studio 등 OpenAI 호환 chat·임베딩 서버를 실행하고, 설정에서 모델명을 지정하세요.</p>
-              <div className="install-actions"><a className="link-btn" href="https://lmstudio.ai" target="_blank" rel="noreferrer">LM Studio 열기</a></div>
-            </div>
-            <div className="settings-section install-step">
-              <h3><span className="step-no">2</span> 웹 또는 데스크톱 앱</h3>
-              <ul className="install-list">
-                <li>웹 서버: <code>npm run build</code> 후 <code>npm start</code></li>
-                <li>데스크톱 트레이 앱: <code>npm run desktop</code></li>
-                <li>Windows 설치본: <code>npm run desktop:dist:win</code></li>
-              </ul>
-            </div>
-            <div className="settings-section install-step">
-              <h3><span className="step-no">3</span> 오프라인 ZIP 패키지</h3>
-              <p className="skill-group-label">서버에서 <code>npm run package</code>로 만든 오프라인 번들을 아래 버튼으로 내려받습니다.</p>
-              <div className="install-actions">
-                <a
-                  className={`link-btn${downloadInfo?.available ? "" : " disabled"}`}
-                  href="/api/download/local-rag"
-                  onClick={(e) => { if (!downloadInfo?.available) e.preventDefault(); }}
-                  aria-disabled={!downloadInfo?.available}
-                >
-                  <Download size={14} /> 앱 다운로드
-                </a>
-                <a className="link-btn secondary-link" href="/api/download/guide">
-                  <FileText size={14} /> 가이드 다운로드
+
+            <div className="settings-section">
+              <p className="skill-group-label">
+                회사 API Key 없이 <strong>내 컴퓨터에서 전부 도는</strong> 프로그램입니다.
+              </p>
+              <div className="install-big">
+                <a className="link-btn big" href="https://github.com/waneekim/local_mini_rag/archive/refs/heads/main.zip" target="_blank" rel="noreferrer">
+                  <Download size={17} /> ARK 다운로드 (ZIP)
                 </a>
               </div>
+              <ol className="install-list big">
+                <li><b>ARK ZIP</b> 압축 풀고 → <code>scripts</code> 폴더의 설치 파일 <b>더블클릭</b> (끝)</li>
+              </ol>
+              <p className="skill-group-label optional">
+                설치가 끝나면 트레이 앱이 실행됩니다 — <b>Ctrl+Shift+Space</b>로 채팅창을 열고,
+                파일을 끌어다 놓고 바로 대화하세요.
+              </p>
             </div>
+
+            <details className="settings-section install-details">
+              <summary>자세한 안내가 필요하면 (문제 해결)</summary>
+              <ul className="install-list">
+                <li>설치 파일: macOS <code>scripts/setup-mac.command</code> · Windows <code>scripts/setup-windows.bat</code></li>
+                <li>Node.js가 없으면 설치 페이지가 자동으로 열립니다 — LTS 설치 후 다시 더블클릭</li>
+                <li>git이 편하면: <button type="button" className="secondary mini-btn" onClick={() => copyText("git clone https://github.com/waneekim/local_mini_rag.git")}>git clone 명령 복사</button></li>
+                <li>연결이 안 되면: ⚙️ 빠른 연결에서 [연결하기]로 상태를 확인하세요</li>
+              </ul>
+            </details>
           </div>
         </div>
       )}

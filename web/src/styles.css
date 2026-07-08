@@ -1459,14 +1459,12 @@ button.secondary.danger {
 }
 .viewer-actions { align-items: center; margin-top: 10px; }
 
-/* ── Install guide + offline package download ── */
-.link-btn.secondary-link { background: transparent; border: 1px solid var(--border, #2a2a2a); color: var(--ink, #eee); }
-.install-step h3 { display: flex; align-items: center; gap: 8px; }
-.step-no {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
-  background: var(--accent, #5888ff); color: #fff; font-size: 0.8rem; font-weight: 700;
-}
+/* ── "내 PC에 설치" 다운로드 팝업 (원래 구성) ── */
+.install-big { display: flex; flex-wrap: wrap; gap: 9px; margin: 10px 0; }
+.link-btn.big { padding: 11px 18px; font-size: 0.92rem; }
+.install-list.big { font-size: 0.9rem; }
+.install-details summary { cursor: pointer; font-size: 0.84rem; color: var(--muted, #9aa); }
+.install-details summary:hover { color: var(--ink, #eee); }
 .install-list { margin: 6px 0 8px; padding-left: 18px; font-size: 0.85rem; line-height: 1.7; }
 .install-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 4px; }
 .link-btn {
@@ -1475,12 +1473,6 @@ button.secondary.danger {
   background: var(--accent, #5888ff); color: #fff;
 }
 .link-btn:hover { filter: brightness(1.1); }
-.link-btn.disabled {
-  background: #aab8b2;
-  color: #eef3f1;
-  cursor: not-allowed;
-  pointer-events: none;
-}
 
 /* ── Simple settings: quick connect + persona manager ── */
 .quick-settings-panel {
