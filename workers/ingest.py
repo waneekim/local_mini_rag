@@ -96,6 +96,25 @@ def extract_text_file(file_path, request):
     return [unit(read_text(path), request, {"format": path.suffix.lower().lstrip(".") or "text"})]
 
 
+# Magic header a NASCA DRM-encrypted file still shows when the decrypting driver
+# did not intercept the read (e.g. the server process is not an allowed app).
+NASCA_DRM_HEADER = b"<## NASCA DRM FILE"
+
+
+def read_pdf_bytes(file_path):
+    # Read through the normal OS file API so a corporate DRM agent (Samsung NASCA)
+    # can hook the ReadFile call and hand back decrypted bytes. fitz.open(path)
+    # may memory-map the file and bypass that hook, yielding encrypted garbage —
+    # so callers must read the bytes here and pass them to fitz.open(stream=...).
+    data = Path(file_path).read_bytes()
+    if data[: len(NASCA_DRM_HEADER)] == NASCA_DRM_HEADER:
+        raise MissingDependency(
+            "The file is encrypted with NASCA DRM and decrypted contents could not be read.",
+            "Run indexing on a PC with the DRM agent and register the server process as an allowed app, or export/decrypt the file first.",
+        )
+    return data
+
+
 def render_pdf(request):
     # Per-page rendering for the preprocessing agent: pages that already have a
     # text layer are returned as text; image-only (scanned) pages are rasterized
@@ -109,7 +128,8 @@ def render_pdf(request):
 
         max_pages = int(request.get("maxPages") or 30)
         text_threshold = int(request.get("textThreshold") or 20)
-        pdf = fitz.open(file_path)
+        data = read_pdf_bytes(file_path)
+        pdf = fitz.open(stream=data, filetype="pdf")
         pages = []
         for page_index in range(min(pdf.page_count, max_pages)):
             page = pdf.load_page(page_index)
@@ -132,7 +152,10 @@ def extract_pdf(file_path, request):
 
     docs = []
     warnings = []
-    pdf = fitz.open(file_path)
+    # DRM-safe read (see read_pdf_bytes): buffered read through the OS API so the
+    # NASCA driver can decrypt, then parse from the in-memory stream.
+    data = read_pdf_bytes(file_path)
+    pdf = fitz.open(stream=data, filetype="pdf")
     for page_index in range(pdf.page_count):
         page = pdf.load_page(page_index)
         text = page.get_text("text").strip()
