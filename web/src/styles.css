@@ -1081,7 +1081,7 @@ input:focus, select:focus, textarea:focus {
   resize: vertical;
 }
 
-.persona-edit-footer {
+.modal-footer.persona-edit-footer {
   justify-content: space-between;
   gap: 12px;
 }

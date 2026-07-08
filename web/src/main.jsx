@@ -145,7 +145,7 @@ function App() {
   const [availableSkills, setAvailableSkills] = useState([]);
   const [skillBusy, setSkillBusy] = useState(false);
   const [agentFilter, setAgentFilter] = useState("");
-  const [suggest, setSuggest] = useState(null); // { type:"mention"|"command", items, index }
+  const [suggest, setSuggest] = useState(null); // { type:"agent"|"source"|"persona"|"skill"|"system", items, index }
   const [autoIndex, setAutoIndex] = useState(() => localStorage.getItem("rag.autoIndex") === "1");
   // Preprocess auto-approve: structure straight into indexing, skipping review.
   const [autoApprove, setAutoApprove] = useState(() => localStorage.getItem("rag.autoApprove") === "1");
