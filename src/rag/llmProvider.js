@@ -116,28 +116,19 @@ export class LlmProvider {
     }
     if (this.provider !== "openai-compatible" || !this.baseUrl || !this.model) return "";
     // Optional per-call output budget / timeout / extra body — used by the
-    // preprocessing agent to scale token budget with document length. Omitted
-    // (0/undefined) reproduces the previous behaviour, so the reranker is unaffected.
+    // preprocessing agent to scale token budget with document length. Without an
+    // explicit timeoutMs the shared default (LLM_TIMEOUT_MS, 120s) still applies.
     const tokenLimit = Number(maxTokens || 0);
-    const response = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {})
-      },
-      body: JSON.stringify({
-        model: this.model,
-        temperature,
-        ...(tokenLimit > 0 ? { max_tokens: tokenLimit } : {}),
-        ...this.extraBody,
-        ...(extraBody !== undefined ? parseJsonObject(extraBody) : {}),
-        messages: [
-          ...(system ? [{ role: "system", content: system }] : []),
-          { role: "user", content: user }
-        ]
-      }),
-      ...(Number(timeoutMs) > 0 ? { signal: AbortSignal.timeout(Number(timeoutMs)) } : {})
-    });
+    const response = await this._chatCompletions({
+      model: this.model,
+      temperature,
+      ...(tokenLimit > 0 ? { max_tokens: tokenLimit } : {}),
+      ...mergeExtraBody(this.extraBody, extraBody),
+      messages: [
+        ...(system ? [{ role: "system", content: system }] : []),
+        { role: "user", content: user }
+      ]
+    }, { timeoutMs });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error?.message || payload.error || `LLM HTTP ${response.status}`);
     return payload.choices?.[0]?.message?.content?.trim() || "";
@@ -186,29 +177,22 @@ export class LlmProvider {
       : userText;
     const model = hasImages && this.visionModel ? this.visionModel : this.model;
 
-    const response = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {})
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.2,
-        ...(this.maxTokens > 0 ? { max_tokens: this.maxTokens } : {}),
-        ...this.extraBody,
-        messages: [
-          {
-            role: "system",
-            content: system || DEFAULT_SYSTEM
-          },
-          {
-            role: "user",
-            content: userContent
-          },
-          ...messages
-        ]
-      })
+    const response = await this._chatCompletions({
+      model,
+      temperature: 0.2,
+      ...(this.maxTokens > 0 ? { max_tokens: this.maxTokens } : {}),
+      ...this.extraBody,
+      messages: [
+        {
+          role: "system",
+          content: system || DEFAULT_SYSTEM
+        },
+        {
+          role: "user",
+          content: userContent
+        },
+        ...messages
+      ]
     });
 
     const payload = await response.json().catch(() => ({}));
@@ -224,6 +208,38 @@ export class LlmProvider {
         usage: payload.usage
       }
     };
+  }
+
+  // Shared OpenAI-compatible chat call (company parity): EVERY request gets a
+  // timeout — per-call timeoutMs when given, else LLM_TIMEOUT_MS (default 120s).
+  // Without this, one stalled LLM request leaves a job loop stuck forever at
+  // "running n/m"; with it the call aborts, the source is marked failed and the
+  // job moves on to the next source.
+  async _chatCompletions(body, options = {}) {
+    if (!this.fetchFn) throw new Error("fetch is not available in this Node runtime");
+
+    const timeoutMs = Number(options.timeoutMs || process.env.LLM_TIMEOUT_MS || 120_000);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      return await this.fetchFn(chatCompletionsUrl(this.baseUrl), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {})
+        },
+        signal: controller.signal,
+        body: JSON.stringify(body)
+      });
+    } catch (error) {
+      if (error.name === "AbortError") {
+        throw new Error(`LLM request timed out after ${timeoutMs}ms`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   mockGenerate({ query, envelope }) {
@@ -388,6 +404,33 @@ function gaussLlmConfig({ base = {}, temperature = 0.2, maxTokens = 0 } = {}) {
   if (Number(maxTokens) > 0) config.max_new_tokens = Number(maxTokens);
   if (temperature !== undefined && temperature !== null) config.temperature = temperature;
   return Object.fromEntries(Object.entries(config).filter(([, value]) => value !== undefined));
+}
+
+// Per-call extra_body merged over the provider-level one (deep merge so nested
+// objects like chat_template_kwargs combine instead of replacing each other).
+function mergeExtraBody(base, override) {
+  return deepMerge(parseJsonObject(base), parseJsonObject(override));
+}
+
+function deepMerge(left, right) {
+  const out = { ...left };
+  for (const [key, value] of Object.entries(right || {})) {
+    if (isPlainObject(value) && isPlainObject(out[key])) out[key] = deepMerge(out[key], value);
+    else out[key] = value;
+  }
+  return out;
+}
+
+function isPlainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+// Accepts a base URL with or without /v1 (or a full /chat/completions URL).
+function chatCompletionsUrl(baseUrl) {
+  const trimmed = String(baseUrl || "").replace(/\/+$/, "");
+  if (/\/chat\/completions$/i.test(trimmed)) return trimmed;
+  if (/\/v1$/i.test(trimmed)) return `${trimmed}/chat/completions`;
+  return `${trimmed}/v1/chat/completions`;
 }
 
 export function gaussMessagesUrl(baseUrl) {
