@@ -1783,8 +1783,15 @@ class RagService {
     );
 
     const inScope = (folder) => !scope || folder === scope || String(folder).startsWith(`${scope}/`);
+    // Optional single/multi-source scoping (@Agent:source in the composer):
+    // restrict retrieval to the given source ids. Absent → search all sources.
+    const onlySources = Array.isArray(input.sourceIds) && input.sourceIds.length
+      ? new Set(input.sourceIds.map(String))
+      : null;
 
-    const candidates = chunks.filter((chunk) => inScope(chunk.folder_path || ""));
+    const candidates = chunks.filter(
+      (chunk) => inScope(chunk.folder_path || "") && (!onlySources || onlySources.has(String(chunk.source_id)))
+    );
     // BM25 lexical scores over the in-scope candidate corpus (concept-expanded
     // query), normalized 0..1. This is a stronger keyword signal than a plain
     // token-presence ratio; it fills the same `keywordScore` slot in the blend

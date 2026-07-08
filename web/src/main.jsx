@@ -44,6 +44,24 @@ const API = "";
 const ACCEPTED_FILE_TYPES =
   ".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xlsm,.xls,.txt,.md,.csv,.json,.html,.htm,.log,.png,.jpg,.jpeg,.tif,.tiff,.webp,.bmp";
 
+// System commands — usable as /add or !add. The "!" sigil is a shortcut that
+// only lists/dispatches these (no mode/skill collision), mirroring the split
+// composer grammar (/persona · @Agent · $skill · !command).
+const SYSTEM_COMMANDS = [
+  { cmd: "add", desc: "텍스트 / @경로 / URL을 소스로 추가" },
+  { cmd: "del", desc: "소스 삭제 (@소스명)" },
+  { cmd: "embed", desc: "임베딩 (@소스 / @all / @except)" },
+  { cmd: "list", desc: "전체 소스 목록" },
+  { cmd: "embed-list", desc: "임베딩된(대화재료) 소스" },
+  { cmd: "no-embed-list", desc: "임베딩 안 된 소스" },
+  { cmd: "types", desc: "임베딩 가능한 파일 형식" },
+  { cmd: "autoindex", desc: "추가 시 자동 임베딩 켜기/끄기" },
+  { cmd: "autoapprove", desc: "전처리 자동 승인(검토 없이 색인) 켜기/끄기" },
+  { cmd: "foldertree", desc: "폴더 추가 시 폴더 구조를 소스로 색인 켜기/끄기" },
+  { cmd: "skills", desc: "설치된 스킬 목록" },
+  { cmd: "help", desc: "도움말" }
+];
+
 // One-click persona templates for the simple settings view. Keys must not
 // collide with the built-in modes (general/compliance/recommend).
 const PERSONA_TEMPLATES = [
@@ -241,22 +259,8 @@ function App() {
 
   const commandList = useMemo(() => {
     const modeCmds = modes.map((m) => ({ cmd: m.label, desc: `모드 · ${m.hint}` }));
-    const base = [
-      { cmd: "add", desc: "텍스트 / @경로 / URL을 소스로 추가" },
-      { cmd: "del", desc: "소스 삭제 (@소스명)" },
-      { cmd: "embed", desc: "임베딩 (@소스 / @all / @except)" },
-      { cmd: "list", desc: "전체 소스 목록" },
-      { cmd: "embed-list", desc: "임베딩된(대화재료) 소스" },
-      { cmd: "no-embed-list", desc: "임베딩 안 된 소스" },
-      { cmd: "types", desc: "임베딩 가능한 파일 형식" },
-      { cmd: "autoindex", desc: "추가 시 자동 임베딩 켜기/끄기" },
-      { cmd: "autoapprove", desc: "전처리 자동 승인(검토 없이 색인) 켜기/끄기" },
-      { cmd: "foldertree", desc: "폴더 추가 시 폴더 구조를 소스로 색인 켜기/끄기" },
-      { cmd: "skills", desc: "설치된 스킬 목록" },
-      { cmd: "help", desc: "도움말" }
-    ];
     const skillCmds = skills.map((s) => ({ cmd: s.name, desc: `스킬 · ${s.description || ""}` }));
-    return [...modeCmds, ...base, ...skillCmds];
+    return [...modeCmds, ...SYSTEM_COMMANDS, ...skillCmds];
   }, [modes, skills]);
 
   useEffect(() => { boot(); }, []);
@@ -1491,45 +1495,89 @@ function App() {
       const tag = `@${p.name}`;
       const idx = text.toLowerCase().indexOf(tag.toLowerCase());
       if (idx !== -1) {
-        const cleanText = (text.slice(0, idx) + text.slice(idx + tag.length)).replace(/\s+/g, " ").trim();
-        return { profileId: p.id, agentName: p.name, cleanText };
+        let after = text.slice(idx + tag.length);
+        let sourceIds = [];
+        let sourceName = "";
+        // @Agent:source — scope retrieval to a single source of that agent.
+        // The name may be quoted ("...") when it contains spaces.
+        const sm = after.match(/^:("[^"]+"|\S+)/);
+        if (sm) {
+          sourceName = sm[1].replace(/^"|"$/g, "");
+          after = after.slice(sm[0].length);
+          const srcs = sourcesByProfile[p.id] || [];
+          const label = (s) => String(s.title || s.relative_path || s.file_name || "").toLowerCase();
+          const q = sourceName.toLowerCase();
+          const match = srcs.find((s) => label(s) === q) || srcs.find((s) => label(s).includes(q));
+          if (match) sourceIds = [match.id];
+        }
+        const cleanText = (text.slice(0, idx) + after).replace(/\s+/g, " ").trim();
+        return { profileId: p.id, agentName: p.name, cleanText, sourceIds, sourceName };
       }
     }
-    return { profileId: "", agentName: "", cleanText: text };
+    return { profileId: "", agentName: "", cleanText: text, sourceIds: [], sourceName: "" };
+  }
+
+  // $skill sigil — run an installed skill by name (or list them). Skills-only,
+  // no mode/command collision.
+  async function handleSkillSigil(text) {
+    const name = text.slice(1).trim().toLowerCase();
+    if (!name || name === "skills") {
+      pushSystem(
+        skills.length
+          ? "설치된 스킬:\n" + skills.map((s) => `$${s.name} — ${s.description || ""}`).join("\n")
+          : "설치된 스킬이 없습니다. 설정(⚙️) > 스킬에서 추가하세요."
+      );
+      return;
+    }
+    const skill = skills.find((s) => s.name.toLowerCase() === name || s.folder?.toLowerCase() === name);
+    if (skill) { await runSkill(skill); return; }
+    pushSystem(`스킬을 찾을 수 없습니다: $${name} — $skills 로 목록을 확인하세요.`);
   }
 
   async function runChat() {
     const text = query.trim();
     if ((!text && !attachments.length) || busy) return;
+    // Split composer grammar: /persona · $skill · !command · @Agent(:source).
     if (text.startsWith("/")) {
-      setQuery("");
-      setSuggest(null);
+      setQuery(""); setSuggest(null);
       await handleCommand(text);
       return;
     }
-    const { profileId, agentName, cleanText } = parseMention(text);
+    if (text.startsWith("$")) {
+      setQuery(""); setSuggest(null);
+      await handleSkillSigil(text);
+      return;
+    }
+    if (text.startsWith("!")) {
+      // "!cmd rest" reuses the system-command dispatcher (same as "/cmd rest").
+      setQuery(""); setSuggest(null);
+      const body = text.slice(1).trim();
+      await handleCommand(body ? `/${body}` : "/help");
+      return;
+    }
+    const { profileId, agentName, cleanText, sourceIds, sourceName } = parseMention(text);
     const targetId = profileId || activeProfileId;
     if (!targetId) return;
     const images = attachments;
     setQuery("");
     setAttachments([]);
     setSuggest(null);
-    await sendMessage(cleanText || text, chatMode, targetId, agentName, images);
+    await sendMessage(cleanText || text, chatMode, targetId, agentName, images, sourceIds, sourceName);
   }
 
-  async function sendMessage(text, mode, targetId = activeProfileId, agentName = "", images = []) {
+  async function sendMessage(text, mode, targetId = activeProfileId, agentName = "", images = [], sourceIds = [], sourceName = "") {
     if (!targetId) return;
     const modeLabel = modes.find((m) => m.key === mode)?.label;
     const crossAgent = agentName && targetId !== activeProfileId ? agentName : "";
-    const userMsg = { id: String(Date.now()), role: "user", content: text, mode, modeLabel, agentName: crossAgent, images };
+    const userMsg = { id: String(Date.now()), role: "user", content: text, mode, modeLabel, agentName: crossAgent, images, sourceName };
     setMessages((prev) => [...prev, userMsg]);
     setBusy(true);
-    setStatus("답변 생성 중");
+    setStatus(sourceName ? `답변 생성 중 · 소스 한정: ${sourceName}` : "답변 생성 중");
     try {
       const payload = await fetchJson(`/api/profiles/${targetId}/chat`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ query: text, topK: 4, mode, images })
+        body: JSON.stringify({ query: text, topK: 4, mode, images, ...(sourceIds?.length ? { sourceIds } : {}) })
       });
       const cites = (payload.citations || []).map((c) => ({ ...c, query: text }));
       const used = new Set([...String(payload.answer).matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
@@ -1571,7 +1619,20 @@ function App() {
   function onQueryChange(e) {
     const val = e.target.value;
     setQuery(val);
-    const at = val.match(/@([^\s@]*)$/);
+    // @Agent:source — suggest that agent's sources after the colon.
+    const atSource = val.match(/@([^\s@:]+):([^\s@]*)$/);
+    if (atSource) {
+      const agent = profiles.find((p) => p.name.toLowerCase() === atSource[1].toLowerCase());
+      if (agent) {
+        const q = atSource[2].toLowerCase();
+        const items = (sourcesByProfile[agent.id] || [])
+          .filter((s) => !q || String(s.title || s.relative_path || s.file_name || "").toLowerCase().includes(q))
+          .slice(0, 6);
+        setSuggest(items.length ? { type: "source", agent, items, index: 0 } : null);
+        return;
+      }
+    }
+    const at = val.match(/@([^\s@:]*)$/);
     if (at) {
       const q = at[1].toLowerCase();
       const items = profiles.filter((p) => p.name.toLowerCase().includes(q)).slice(0, 6);
@@ -1585,12 +1646,39 @@ function App() {
       setSuggest(items.length ? { type: "command", items, index: 0 } : null);
       return;
     }
+    // $skill — installed skills only.
+    const dollar = val.match(/^\$([^\s]*)$/);
+    if (dollar) {
+      const q = dollar[1].toLowerCase();
+      const items = skills
+        .filter((s) => s.name.toLowerCase().includes(q))
+        .map((s) => ({ cmd: s.name, desc: `스킬 · ${s.description || ""}` }))
+        .slice(0, 8);
+      setSuggest(items.length ? { type: "skill", items, index: 0 } : null);
+      return;
+    }
+    // !command — system commands only.
+    const bang = val.match(/^!([^\s]*)$/);
+    if (bang) {
+      const q = bang[1].toLowerCase();
+      const items = SYSTEM_COMMANDS.filter((c) => c.cmd.toLowerCase().includes(q)).slice(0, 8);
+      setSuggest(items.length ? { type: "system", items, index: 0 } : null);
+      return;
+    }
     setSuggest(null);
   }
 
   function pickSuggest(item) {
     if (suggest?.type === "mention") {
-      setQuery((val) => val.replace(/@([^\s@]*)$/, `@${item.name} `));
+      setQuery((val) => val.replace(/@([^\s@:]*)$/, `@${item.name} `));
+    } else if (suggest?.type === "source") {
+      const label = item.title || item.relative_path || item.file_name || "";
+      const quoted = /\s/.test(label) ? `"${label}"` : label;
+      setQuery((val) => val.replace(/(@[^\s@:]+:)[^\s@]*$/, `$1${quoted} `));
+    } else if (suggest?.type === "skill") {
+      setQuery(`$${item.cmd} `);
+    } else if (suggest?.type === "system") {
+      setQuery(`!${item.cmd} `);
     } else {
       setQuery(`/${item.cmd} `);
     }
@@ -3234,7 +3322,7 @@ function App() {
                   <div className="mention-pop">
                     {suggest.items.map((item, i) => (
                       <button
-                        key={suggest.type === "mention" ? item.id : item.cmd}
+                        key={suggest.type === "mention" || suggest.type === "source" ? item.id : item.cmd}
                         type="button"
                         className={`mention-item ${i === suggest.index ? "active" : ""}`}
                         onMouseEnter={() => setSuggest((s) => (s ? { ...s, index: i } : s))}
@@ -3242,8 +3330,13 @@ function App() {
                       >
                         {suggest.type === "mention" ? (
                           <><Bot size={13} />{item.name}</>
+                        ) : suggest.type === "source" ? (
+                          <><FileText size={13} />{item.title || item.relative_path || item.file_name}</>
                         ) : (
-                          <><span className="sug-cmd">/{item.cmd}</span><span className="sug-desc">{item.desc}</span></>
+                          <>
+                            <span className="sug-cmd">{suggest.type === "skill" ? "$" : suggest.type === "system" ? "!" : "/"}{item.cmd}</span>
+                            <span className="sug-desc">{item.desc}</span>
+                          </>
                         )}
                       </button>
                     ))}
@@ -3275,7 +3368,7 @@ function App() {
                     placeholder={
                       activeMode && chatMode !== "general"
                         ? `[${activeMode.label}] ${activeMode.hint}`
-                        : "메시지 / @Agent / 명령 입력… (Enter 전송 · Shift+Enter 줄바꿈)"
+                        : "메시지 · /모드 · @Agent(:소스) · $스킬 · !명령 (Enter 전송 · Shift+Enter 줄바꿈)"
                     }
                     disabled={busy}
                     style={{ height: inputHeight }}
