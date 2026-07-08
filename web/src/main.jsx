@@ -3067,7 +3067,7 @@ function App() {
                 )}
               </div>
 
-              <div className="settings-section quick-actions" hidden={advancedSettings}>
+              <div className="settings-section quick-actions">
                 <button type="button" className="secondary" onClick={() => setAdvancedSettings(true)}>고급 설정</button>
               </div>
             </div>
