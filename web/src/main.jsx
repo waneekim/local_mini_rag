@@ -146,7 +146,8 @@ function App() {
   const [skillBusy, setSkillBusy] = useState(false);
   const [agentFilter, setAgentFilter] = useState("");
   const [suggest, setSuggest] = useState(null); // { type:"agent"|"source"|"persona"|"skill"|"system", items, index }
-  const [autoIndex, setAutoIndex] = useState(() => localStorage.getItem("rag.autoIndex") === "1");
+  // Default ON (company behavior): only an explicit "0" turns auto-embedding off.
+  const [autoIndex, setAutoIndex] = useState(() => localStorage.getItem("rag.autoIndex") !== "0");
   // Preprocess auto-approve: structure straight into indexing, skipping review.
   const [autoApprove, setAutoApprove] = useState(() => localStorage.getItem("rag.autoApprove") === "1");
   // Folder tree: when adding a folder, also index its structure as a source.
