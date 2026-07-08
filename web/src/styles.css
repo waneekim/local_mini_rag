@@ -1320,15 +1320,6 @@ button.secondary.danger {
 .source-pick button:hover { background: var(--accent-dark); }
 .source-hint { margin: 0; font-size: 0.82rem; color: var(--muted, #9aa); line-height: 1.55; }
 
-/* ── Sidebar footer (install entry lives here, out of the way) ── */
-.sidebar-footer { margin-top: auto; padding: 8px 10px; border-top: 1px solid var(--border, #2a2a2a); }
-.footer-link {
-  display: inline-flex; align-items: center; gap: 6px; padding: 6px 8px;
-  background: transparent; border: 0; border-radius: 8px; cursor: pointer;
-  color: var(--muted, #9aa); font-size: 0.78rem;
-}
-.footer-link:hover { color: var(--ink, #eee); background: rgba(255,255,255,0.05); }
-
 /* ── Document viewer (double-click a source) ── */
 .viewer-modal { max-width: 760px; }
 .viewer-path { margin: -4px 0 8px; font-size: 0.76rem; color: var(--muted, #9aa); }
@@ -1340,15 +1331,8 @@ button.secondary.danger {
 }
 .viewer-actions { align-items: center; margin-top: 10px; }
 
-/* Simplified install modal */
-.install-big { display: flex; flex-wrap: wrap; gap: 9px; margin: 10px 0; }
-.link-btn.big { padding: 11px 18px; font-size: 0.92rem; }
+/* ── Install guide + offline package download ── */
 .link-btn.secondary-link { background: transparent; border: 1px solid var(--border, #2a2a2a); color: var(--ink, #eee); }
-.install-list.big { font-size: 0.9rem; }
-.install-details summary { cursor: pointer; font-size: 0.84rem; color: var(--muted, #9aa); }
-.install-details summary:hover { color: var(--ink, #eee); }
-
-/* ── "내 PC에 설치" local-package guide ── */
 .install-step h3 { display: flex; align-items: center; gap: 8px; }
 .step-no {
   display: inline-flex; align-items: center; justify-content: center;
@@ -1363,6 +1347,12 @@ button.secondary.danger {
   background: var(--accent, #5888ff); color: #fff;
 }
 .link-btn:hover { filter: brightness(1.1); }
+.link-btn.disabled {
+  background: #aab8b2;
+  color: #eef3f1;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 
 /* ── Simple settings: quick connect + persona manager ── */
 .quick-server {

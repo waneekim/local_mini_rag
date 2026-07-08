@@ -2,7 +2,7 @@ import "./env/loadEnv.js";
 import Fastify from "fastify";
 import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, statSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -447,6 +447,37 @@ export async function createApp(options = {}) {
   app.post("/api/central/import", async (request, reply) => {
     const result = await rag.importFromRemote(request.body || {});
     return reply.code(201).send(result);
+  });
+
+  // --- Local RAG program download (offline bundle + guide) ----------------
+  // GET routes, so they stay public on a shared host. The zip is produced by
+  // `npm run package`; the guide ships with the repo.
+  const bundlePath = join(projectRoot, "dist", "download", "ark-local-rag.zip");
+  const guidePath = join(projectRoot, "GUIDE.md");
+
+  app.get("/api/download/info", async () => ({
+    available: existsSync(bundlePath),
+    filename: "ark-local-rag.zip",
+    size: existsSync(bundlePath) ? statSync(bundlePath).size : 0,
+    guideAvailable: existsSync(guidePath)
+  }));
+
+  app.get("/api/download/local-rag", async (request, reply) => {
+    if (!existsSync(bundlePath)) {
+      return reply.code(404).send({
+        error: "패키지가 아직 생성되지 않았습니다. 서버에서 `npm run package` 를 실행하세요."
+      });
+    }
+    reply.header("content-type", "application/zip");
+    reply.header("content-disposition", 'attachment; filename="ark-local-rag.zip"');
+    return reply.send(createReadStream(bundlePath));
+  });
+
+  app.get("/api/download/guide", async (request, reply) => {
+    if (!existsSync(guidePath)) return reply.code(404).send({ error: "가이드 문서가 없습니다." });
+    reply.header("content-type", "text/markdown; charset=utf-8");
+    reply.header("content-disposition", 'attachment; filename="GUIDE.md"');
+    return reply.send(createReadStream(guidePath));
   });
 
   const clientDir = join(projectRoot, "dist", "client");
