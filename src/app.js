@@ -181,6 +181,32 @@ export async function createApp(options = {}) {
     return rag.setPublished(request.params.profileId, request.body?.published !== false);
   });
 
+  // Server-Sent Events: live job/source progress for a profile so the UI can
+  // update without polling. Falls back gracefully — if the client never opens
+  // this, the existing job polling still works.
+  app.get("/api/profiles/:profileId/events", async (request, reply) => {
+    const profileId = request.params.profileId;
+    rag.ensureProfile(profileId);
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "x-accel-buffering": "no"
+    });
+    const send = (event) => {
+      reply.raw.write(`event: ${event.type || "message"}\n`);
+      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+    const unsubscribe = rag.subscribeProfile(profileId, send);
+    const keepAlive = setInterval(() => reply.raw.write(": keep-alive\n\n"), 15000);
+    send({ type: "ready", profileId });
+    request.raw.on("close", () => {
+      clearInterval(keepAlive);
+      unsubscribe();
+    });
+  });
+
   app.get("/api/profiles/:profileId/sources", async (request) => {
     return rag.listSources(request.params.profileId);
   });

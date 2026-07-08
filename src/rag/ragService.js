@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { createWriteStream, existsSync, readdirSync, statSync } from "node:fs";
 import { copyFile, mkdir, rm } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
@@ -50,6 +51,10 @@ class RagService {
     this._pythonCommand = pythonCommand;
     this.settingsStore = settingsStore;
     this.modeStore = modeStore;
+    // Per-profile event bus for SSE (/events): live job/source progress so the
+    // UI can update without polling. Bounded listener count for many open tabs.
+    this.events = new EventEmitter();
+    this.events.setMaxListeners(200);
     this.worker = new WorkerClient({ projectRoot, pythonCommand });
     this.reranker = reranker || new RerankService();
 
@@ -1507,6 +1512,17 @@ class RagService {
     return one(this.db, "SELECT * FROM sources WHERE id = ?", sourceId);
   }
 
+  // ── SSE event bus (live job/source progress) ──
+  emitProfileEvent(profileId, payload) {
+    this.events.emit(String(profileId), { profileId, ...payload, at: nowIso() });
+  }
+
+  subscribeProfile(profileId, handler) {
+    const key = String(profileId);
+    this.events.on(key, handler);
+    return () => this.events.off(key, handler);
+  }
+
   async startIndexJob(profileId, input = {}) {
     this.ensureProfile(profileId);
     const at = nowIso();
@@ -1566,6 +1582,10 @@ class RagService {
       processed_sources: 0,
       failed_sources: 0
     });
+    this.emitProfileEvent(profileId, {
+      type: "job", jobId, jobType: "index", status: "running", message: "Indexing",
+      totalSources: candidates.length, processedSources: 0, failedSources: 0
+    });
 
     let processed = 0;
     let failed = 0;
@@ -1598,6 +1618,11 @@ class RagService {
           failed_sources: failed
         });
       }
+      this.emitProfileEvent(profileId, {
+        type: "job", jobId, jobType: "index", status: "running",
+        message: `Indexed ${processed}/${candidates.length}`,
+        totalSources: candidates.length, processedSources: processed, failedSources: failed
+      });
     }
 
     updateJob(this.db, jobId, {
@@ -1605,6 +1630,12 @@ class RagService {
       message: failed ? `${failed} source(s) need action` : "Completed",
       processed_sources: processed,
       failed_sources: failed
+    });
+    this.emitProfileEvent(profileId, {
+      type: "job", jobId, jobType: "index",
+      status: failed ? "completed_with_errors" : "completed",
+      message: failed ? `${failed} source(s) need action` : "Completed",
+      totalSources: candidates.length, processedSources: processed, failedSources: failed
     });
     touchProfile(this.db, profileId);
   }

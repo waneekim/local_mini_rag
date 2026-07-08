@@ -292,6 +292,24 @@ function App() {
     }
   }, [agentFilter, profiles]);
 
+  // Live progress via SSE: subscribe to the active agent's event stream and
+  // refresh its source tree as indexing jobs advance (no polling needed). The
+  // stream is best-effort — if it drops, the existing job polling still works.
+  useEffect(() => {
+    if (!activeProfileId) return;
+    let es;
+    try {
+      es = new EventSource(`${API}/api/profiles/${activeProfileId}/events`);
+    } catch {
+      return;
+    }
+    const onJob = () => loadSources(activeProfileId);
+    es.addEventListener("job", onJob);
+    es.addEventListener("source", onJob);
+    es.onerror = () => { /* browser auto-reconnects; ignore transient drops */ };
+    return () => { es.close(); };
+  }, [activeProfileId]);
+
   useEffect(() => {
     function onClick() { setMenu(null); }
     function onKey(e) { if (e.key === "Escape") { setMenu(null); setSourceModal(null); setCrop(null); setDragRect(null); } }
