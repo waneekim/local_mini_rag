@@ -104,16 +104,21 @@ export class LlmProvider {
 
   // Plain system+user completion (no RAG envelope). Used by the LLM reranker.
   // Returns the assistant text, or "" for the mock/unconfigured provider.
-  async complete({ system, user, temperature = 0 }) {
+  async complete({ system, user, temperature = 0, maxTokens = 0, extraBody, timeoutMs } = {}) {
     if (this.provider === "gauss-openapi") {
       return this._gaussChat({
         systemPrompt: clipEndText(system || "", this.gaussSystemMaxChars, "\n\n[...system instructions truncated for Gauss...]\n"),
         contents: [clipMiddleText(String(user || ""), this.gaussContentMaxChars, "\n\n[...content truncated for Gauss...]\n")],
         temperature,
-        maxTokens: Number(this.maxTokens || 0)
+        maxTokens: Number(maxTokens || this.maxTokens || 0),
+        timeoutMs
       });
     }
     if (this.provider !== "openai-compatible" || !this.baseUrl || !this.model) return "";
+    // Optional per-call output budget / timeout / extra body — used by the
+    // preprocessing agent to scale token budget with document length. Omitted
+    // (0/undefined) reproduces the previous behaviour, so the reranker is unaffected.
+    const tokenLimit = Number(maxTokens || 0);
     const response = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: {
@@ -123,12 +128,15 @@ export class LlmProvider {
       body: JSON.stringify({
         model: this.model,
         temperature,
+        ...(tokenLimit > 0 ? { max_tokens: tokenLimit } : {}),
         ...this.extraBody,
+        ...(extraBody !== undefined ? parseJsonObject(extraBody) : {}),
         messages: [
           ...(system ? [{ role: "system", content: system }] : []),
           { role: "user", content: user }
         ]
-      })
+      }),
+      ...(Number(timeoutMs) > 0 ? { signal: AbortSignal.timeout(Number(timeoutMs)) } : {})
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error?.message || payload.error || `LLM HTTP ${response.status}`);
