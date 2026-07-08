@@ -161,6 +161,9 @@ function App() {
   const [editingId, setEditingId] = useState("");
   const [editingName, setEditingName] = useState("");
   const [menu, setMenu] = useState(null);
+  // Composer quick menus: persona add (+) and skills (✨) dropdowns next to the input.
+  const [personaMenuOpen, setPersonaMenuOpen] = useState(false);
+  const [skillMenuOpen, setSkillMenuOpen] = useState(false);
   // Unified source-add modal: one entry point, one dialog with tabs for
   // file / folder / url / text / image. { pid, tab }.
   const [sourceModal, setSourceModal] = useState(null);
@@ -311,8 +314,8 @@ function App() {
   }, [activeProfileId]);
 
   useEffect(() => {
-    function onClick() { setMenu(null); }
-    function onKey(e) { if (e.key === "Escape") { setMenu(null); setSourceModal(null); } }
+    function onClick() { setMenu(null); setPersonaMenuOpen(false); setSkillMenuOpen(false); }
+    function onKey(e) { if (e.key === "Escape") { setMenu(null); setSourceModal(null); setPersonaMenuOpen(false); setSkillMenuOpen(false); } }
     // Paste a screenshot image anywhere in the app → extract text (native ⌃⌘⇧4 → ⌘V).
     function onPaste(e) {
       const item = [...(e.clipboardData?.items || [])].find((it) => it.type.startsWith("image/"));
@@ -3315,7 +3318,36 @@ function App() {
                   />
                 </div>
                 <div className="composer-bar">
-                  <div className="input-tools" />
+                  <div className="input-tools" onClick={(e) => e.stopPropagation()}>
+                    <div className="composer-menu-wrap">
+                      <button
+                        type="button"
+                        className="tool"
+                        title="페르소나 추가"
+                        aria-label="페르소나 추가"
+                        onClick={() => { setSkillMenuOpen(false); setPersonaMenuOpen((o) => !o); }}
+                      >
+                        <Plus size={16} />
+                      </button>
+                      {personaMenuOpen && (
+                        <div className="composer-menu">
+                          <button type="button" onClick={() => { setPersonaMenuOpen(false); setSettingsOpen(true); startNewMode(); }}>
+                            <strong>새 페르소나</strong>
+                            <span>커스텀 페르소나 만들기</span>
+                          </button>
+                          {PERSONA_TEMPLATES.filter((t) => !modes.some((m) => m.key === t.key)).map((t) => (
+                            <button key={t.key} type="button" disabled={modes.length >= 10} onClick={() => { setPersonaMenuOpen(false); addPersona(t); }}>
+                              <strong>{t.label}</strong>
+                              <span>{t.hint}</span>
+                            </button>
+                          ))}
+                          {PERSONA_TEMPLATES.every((t) => modes.some((m) => m.key === t.key)) && (
+                            <p className="empty tiny">{modes.length >= 10 ? "모드는 최대 10개입니다." : "템플릿을 모두 추가했습니다."}</p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
                   <button type="button" onClick={runChat} disabled={busy || (!query.trim() && !attachments.length)} aria-label="전송" className="send-btn">
                     <Send size={18} />
                   </button>

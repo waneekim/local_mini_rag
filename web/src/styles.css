@@ -920,6 +920,26 @@ input:focus, select:focus, textarea:focus {
 .input-tools .tool.toggle.on { color: #fff; background: var(--accent); }
 .input-tools .tool.toggle.on:hover { background: var(--accent-dark); }
 
+/* Composer quick menus (persona +, skills ✨) — dropdown above the input bar */
+.composer-menu-wrap { position: relative; }
+.composer-menu {
+  position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 60;
+  min-width: 220px; max-height: 320px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px; padding: 6px;
+  background: var(--panel, var(--bg)); border: 1px solid var(--border, #2a2a2a);
+  border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.28);
+}
+.composer-menu button {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  padding: 8px 10px; border: 0; border-radius: 8px; background: transparent;
+  color: var(--ink, inherit); cursor: pointer; text-align: left; width: 100%;
+}
+.composer-menu button:hover:not(:disabled) { background: var(--bg); }
+.composer-menu button:disabled { opacity: 0.45; cursor: not-allowed; }
+.composer-menu button strong { font-size: 0.86rem; font-weight: 600; }
+.composer-menu button span { font-size: 0.76rem; color: var(--muted, #9aa); }
+.composer-menu .empty.tiny { margin: 4px 8px; font-size: 0.78rem; color: var(--muted, #9aa); }
+
 .composer .send-btn {
   width: 36px;
   height: 36px;
