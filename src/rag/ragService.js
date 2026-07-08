@@ -1134,7 +1134,7 @@ class RagService {
     if (text.trim().length < minText) {
       const err = new Error(
         `URL에서 내용을 자동으로 가져오지 못했습니다.\n\n시도한 방법:\n- ${reasons.join("\n- ")}\n\n` +
-          `수동 방법: 브라우저에서 아래 링크를 직접 열어 본문을 복사한 뒤, "소스 추가 → 텍스트" 탭에 붙여넣으세요.\n${url}`
+          `수동 방법: 브라우저에서 아래 링크를 직접 열어 본문을 복사한 뒤, 소스 추가 팝업의 내용란에 붙여넣으세요.\n${url}`
       );
       throw Object.assign(err, { statusCode: 502, reasons, url });
     }
