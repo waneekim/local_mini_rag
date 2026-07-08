@@ -1969,7 +1969,7 @@ function App() {
       setGaussModels([]);
       setGaussModelStatus("");
       if (form.llm.provider === "gauss-openapi") {
-        setGaussModelStatus("모델 목록 불러오는 중…");
+        setGaussModelStatus("Loading models...");
         fetchJson("/api/settings/gauss/models", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -2064,7 +2064,7 @@ function App() {
         : [];
     if (list.length) {
       setGaussModels(list);
-      setGaussModelStatus(`모델 ${list.length}개 로드됨`);
+      setGaussModelStatus(`${list.length} model(s) loaded`);
     } else if (result?.llm?.detail || result?.detail) {
       setGaussModelStatus(result.llm?.detail || result.detail);
     }
@@ -2073,7 +2073,7 @@ function App() {
   async function loadGaussModels() {
     if (!settingsForm) return;
     setConnBusy(true);
-    setGaussModelStatus("모델 목록 불러오는 중…");
+    setGaussModelStatus("Loading models...");
     try {
       const result = await fetchJson("/api/settings/gauss/models", {
         method: "POST",
@@ -3020,59 +3020,63 @@ function App() {
       )}
 
       {settingsOpen && settingsForm && settingsState && (
-        <div className="modal-overlay" onClick={() => setSettingsOpen(false)}>
+        <div className="modal-overlay">
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h2>연결 설정</h2>
               <button className="icon-button" type="button" onClick={() => setSettingsOpen(false)}><X size={18} /></button>
             </div>
 
-            {/* Simple view: API key → connect. Everything else stays behind 고급 설정. */}
-            {!advancedSettings && (
-              <>
-                <div className="settings-section">
-                  <h3>빠른 연결</h3>
-                  <p className="skill-group-label">
-                    서버 주소·모델은 미리 설정되어 있습니다. <strong>API Key만 입력하고 연결</strong>하면 바로 사용할 수 있어요.
-                  </p>
-                  <div className="quick-server">
-                    <span className="quick-server-name">{presetName || settingsState.activePreset}</span>
-                    <span className="optional">{settingsForm.llm.model || "모델 미지정"} · {settingsForm.llm.baseUrl || "서버 미지정"}</span>
-                  </div>
-                  {settingsForm.llm?.provider === "gauss-openapi" ? (
-                    <div className="skill-repo-row">
-                      <span className="optional">Gauss는 저장된 클라이언트 토큰·OpenAPI 토큰·이메일로 연결합니다.</span>
-                      <button type="button" onClick={quickConnect} disabled={connBusy}>
-                        {connBusy ? "확인 중…" : "연결하기"}
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="skill-repo-row">
-                      <input
-                        type="password"
-                        value={quickKey}
-                        onChange={(e) => setQuickKey(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === "Enter") quickConnect(); }}
-                        placeholder="API Key 붙여넣기 (없는 서버면 비워두고 연결)"
-                        autoFocus
-                      />
-                      <button type="button" onClick={quickConnect} disabled={connBusy}>
-                        {connBusy ? "확인 중…" : "연결하기"}
-                      </button>
-                    </div>
-                  )}
-                  {connTest && !connTest.busy && (
-                    <div className="conn-results">
-                      <div className={`conn-row ${connTest.llm?.ok ? "ok" : "bad"}`}>
-                        {connTest.llm?.ok ? "✅" : "❌"} 대화 모델 — {connTest.llm?.detail}
-                      </div>
-                      <div className={`conn-row ${connTest.embedding?.ok ? "ok" : "bad"}`}>
-                        {connTest.embedding?.ok ? "✅" : "❌"} 문서 검색(임베딩) — {connTest.embedding?.detail}
-                      </div>
-                    </div>
-                  )}
+            {/* Company layout: quick panel always visible, advanced expands below. */}
+            <div className="quick-settings-panel">
+              <div className="settings-section">
+                <h3>빠른 연결</h3>
+                <p className="skill-group-label">
+                  서버 주소·모델은 미리 설정되어 있습니다. <strong>API Key만 입력하고 연결</strong>하면 바로 사용할 수 있어요.
+                </p>
+                <div className="quick-server">
+                  <span className="quick-server-name">{presetName || settingsState.activePreset}</span>
+                  <span className="optional">{settingsForm.llm.model || "모델 미지정"} · {settingsForm.llm.baseUrl || "서버 미지정"}</span>
                 </div>
+                {settingsForm.llm?.provider === "gauss-openapi" ? (
+                  <div className="skill-repo-row">
+                    <span className="optional">Gauss는 저장된 클라이언트 토큰·OpenAPI 토큰·이메일로 연결합니다.</span>
+                    <button type="button" onClick={quickConnect} disabled={connBusy}>
+                      {connBusy ? "확인 중…" : "연결하기"}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="skill-repo-row">
+                    <input
+                      type="password"
+                      value={quickKey}
+                      onChange={(e) => setQuickKey(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") quickConnect(); }}
+                      placeholder="API Key 붙여넣기 (없는 서버면 비워두고 연결)"
+                    />
+                    <button type="button" onClick={quickConnect} disabled={connBusy}>
+                      {connBusy ? "확인 중…" : "연결하기"}
+                    </button>
+                  </div>
+                )}
+                {connTest && !connTest.busy && (
+                  <div className="conn-results">
+                    <div className={`conn-row ${connTest.llm?.ok ? "ok" : "bad"}`}>
+                      {connTest.llm?.ok ? "✅" : "❌"} 대화 모델 — {connTest.llm?.detail}
+                    </div>
+                    <div className={`conn-row ${connTest.embedding?.ok ? "ok" : "bad"}`}>
+                      {connTest.embedding?.ok ? "✅" : "❌"} 문서 검색(임베딩) — {connTest.embedding?.detail}
+                    </div>
+                  </div>
+                )}
+              </div>
 
+              <div className="settings-section quick-actions" hidden={advancedSettings}>
+                <button type="button" className="secondary" onClick={() => setAdvancedSettings(true)}>고급 설정</button>
+              </div>
+            </div>
+
+            <div hidden={advancedSettings}>
                 <div className="settings-section">
                   <h3>페르소나 <span className="optional">(대화 모드 · ★=기본)</span></h3>
                   <p className="skill-group-label">
@@ -3107,20 +3111,9 @@ function App() {
                     </>
                   )}
                 </div>
-
-                <div className="settings-section">
-                  <button type="button" className="secondary" onClick={() => setAdvancedSettings(true)}>
-                    <Settings size={14} /> 고급 설정 (서버 주소·프리셋·스킬…)
-                  </button>
-                </div>
-              </>
-            )}
-
-            {advancedSettings && (
-              <>
-            <div className="settings-section">
-              <button type="button" className="secondary mini-btn" onClick={() => setAdvancedSettings(false)}>← 간단 설정으로</button>
             </div>
+
+            <div hidden={!advancedSettings}>
             <div className="settings-section">
               <h3>프리셋 <span className="optional">(집 / 회사 등 환경별 저장)</span></h3>
               <div className="preset-row">
@@ -3155,52 +3148,52 @@ function App() {
             <div className="settings-section">
               <h3>LLM</h3>
               <div className="settings-grid">
-                <label>
-                  프로바이더
+                <label>Provider
                   <select value={settingsForm.llm.provider || "openai-compatible"} onChange={(e) => setLlmField("provider", e.target.value)}>
-                    <option value="openai-compatible">OpenAI 호환 (LM Studio · vLLM · 사내 서버)</option>
-                    <option value="gauss-openapi">Gauss OpenAPI (삼성 사내 · chat 전용)</option>
+                    <option value="openai-compatible">OpenAI compatible / LM Studio</option>
+                    <option value="gauss-openapi">Gauss OpenAPI chat</option>
+                    <option value="mock">Mock</option>
                   </select>
                 </label>
-                <label>서버 URL<input value={settingsForm.llm.baseUrl || ""} onChange={(e) => setLlmField("baseUrl", e.target.value)} placeholder={settingsForm.llm.provider === "gauss-openapi" ? "https://genai-openapi.sec.samsung.net/.../api-chat" : "http://localhost:1234/v1"} /></label>
+                <label>Server URL<input value={settingsForm.llm.baseUrl || ""} onChange={(e) => setLlmField("baseUrl", e.target.value)} placeholder={settingsForm.llm.provider === "gauss-openapi" ? "https://genai-openapi.sec.samsung.net/dxhq/trial/api-chat" : "http://localhost:1234/v1"} /></label>
                 {settingsForm.llm.provider === "gauss-openapi" ? (
-                  <label>모델
+                  <label>Model
                     <select className="model-select" value={settingsForm.llm.model || ""} onChange={(e) => setLlmField("model", e.target.value)}>
-                      {!settingsForm.llm.model && <option value="">Gauss 모델 선택</option>}
+                      {!settingsForm.llm.model && <option value="">Select Gauss model</option>}
                       {mergeGaussModelOptions(settingsForm.llm.model, gaussModels.length ? gaussModels : connTest?.llm?.models).map((model) => (
                         <option key={model.id} value={model.id}>{gaussModelLabel(model)}</option>
                       ))}
                     </select>
                     <div className="field-actions">
-                      <button type="button" className="secondary mini-btn" onClick={loadGaussModels} disabled={connBusy}>모델 목록 불러오기</button>
+                      <button type="button" className="secondary mini-btn" onClick={loadGaussModels} disabled={connBusy}>Load models</button>
                       {gaussModelStatus && <span className="optional">{gaussModelStatus}</span>}
                     </div>
                   </label>
                 ) : (
-                  <label>모델명<input value={settingsForm.llm.model || ""} onChange={(e) => setLlmField("model", e.target.value)} placeholder="qwen2.5-14b-instruct" /></label>
+                  <label>Model name<input value={settingsForm.llm.model || ""} onChange={(e) => setLlmField("model", e.target.value)} placeholder="qwen2.5-14b-instruct" /></label>
                 )}
-                {settingsForm.llm.provider !== "gauss-openapi" && (
-                  <label>비전 모델 <span className="optional">(선택)</span><input value={settingsForm.llm.visionModel || ""} onChange={(e) => setLlmField("visionModel", e.target.value)} placeholder="qwen2-vl-7b-instruct" /></label>
-                )}
-                <label>API Key <span className="optional">(선택)</span><input type="password" value={settingsForm.llm.apiKey || ""} onChange={(e) => setLlmField("apiKey", e.target.value)} placeholder="없으면 비워두세요" /></label>
-                {settingsForm.llm.provider === "gauss-openapi" && (
+                {settingsForm.llm.provider === "gauss-openapi" ? (
                   <>
-                    <label>Gauss Client Token<input type="password" value={settingsForm.llm.gaussClientToken || ""} onChange={(e) => setLlmField("gaussClientToken", e.target.value)} placeholder="x-generative-ai-client" /></label>
-                    <label>Gauss OpenAPI Token<input type="password" value={settingsForm.llm.gaussOpenapiToken || ""} onChange={(e) => setLlmField("gaussOpenapiToken", e.target.value)} placeholder="Bearer …" /></label>
-                    <label>Gauss User Email<input value={settingsForm.llm.gaussUserEmail || ""} onChange={(e) => setLlmField("gaussUserEmail", e.target.value)} placeholder="name@samsung.com" /></label>
-                    <p className="settings-note optional">Gauss는 chat 전용입니다 — 이미지/비전은 지원하지 않으며, 임베딩은 아래 임베딩 서버를 별도로 씁니다.</p>
+                    <label>Gauss client token<input type="password" value={settingsForm.llm.gaussClientToken || ""} onChange={(e) => setLlmField("gaussClientToken", e.target.value)} placeholder="x-generative-ai-client" /></label>
+                    <label>Gauss OpenAPI token<input type="password" value={settingsForm.llm.gaussOpenapiToken || ""} onChange={(e) => setLlmField("gaussOpenapiToken", e.target.value)} placeholder="Bearer ..." /></label>
+                    <label>User email<input value={settingsForm.llm.gaussUserEmail || ""} onChange={(e) => setLlmField("gaussUserEmail", e.target.value)} placeholder="name@example.com" /></label>
+                  </>
+                ) : (
+                  <>
+                    <label>Vision model <span className="optional">(optional)</span><input value={settingsForm.llm.visionModel || ""} onChange={(e) => setLlmField("visionModel", e.target.value)} placeholder="qwen2-vl-7b-instruct" /></label>
+                    <label>API Key <span className="optional">(optional)</span><input type="password" value={settingsForm.llm.apiKey || ""} onChange={(e) => setLlmField("apiKey", e.target.value)} placeholder="Leave blank for keyless servers" /></label>
                   </>
                 )}
               </div>
               <div className="connection-test">
-                <button type="button" className="secondary mini-btn" onClick={testSettings} disabled={connBusy}>{connBusy ? "테스트 중…" : "연결 테스트"}</button>
+                <button type="button" className="secondary mini-btn" onClick={testSettings} disabled={connBusy}>{connBusy ? "Testing" : "Test connection"}</button>
                 {connTest && !connTest.busy && (
                   connTest.error ? (
                     <span className="conn-pill fail">{connTest.error}</span>
                   ) : (
                     <>
-                      <span className={`conn-pill ${connTest.llm?.ok ? "ok" : "fail"}`}>LLM {connTest.llm?.ok ? "OK" : connTest.llm?.error || "실패"}</span>
-                      <span className={`conn-pill ${connTest.embedding?.ok ? "ok" : "fail"}`}>임베딩 {connTest.embedding?.ok ? "OK" : connTest.embedding?.error || "실패"}</span>
+                      <span className={`conn-pill ${connTest.llm?.ok ? "ok" : "fail"}`}>LLM {connTest.llm?.ok ? "OK" : connTest.llm?.error || "Failed"}</span>
+                      <span className={`conn-pill ${connTest.embedding?.ok ? "ok" : "fail"}`}>Embedding {connTest.embedding?.ok ? "OK" : connTest.embedding?.error || "Failed"}</span>
                     </>
                   )
                 )}
@@ -3354,14 +3347,12 @@ function App() {
                 )}
               </div>
             </div>
-              </>
-            )}
+
+            </div>
 
             <div className="modal-footer">
-              <button type="button" className="secondary" onClick={() => setSettingsOpen(false)}>{advancedSettings ? "취소" : "닫기"}</button>
-              {advancedSettings && (
-                <button type="button" onClick={saveSettings} disabled={!presetName.trim()}>저장 · 적용</button>
-              )}
+              <button type="button" className="secondary" onClick={() => setSettingsOpen(false)}>취소</button>
+              <button type="button" onClick={saveSettings} disabled={!presetName.trim()}>저장 · 적용</button>
             </div>
           </div>
         </div>

@@ -1483,6 +1483,18 @@ button.secondary.danger {
 }
 
 /* ── Simple settings: quick connect + persona manager ── */
+.quick-settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .quick-server {
   display: flex; flex-direction: column; gap: 2px; margin: 8px 0 10px;
   padding: 9px 12px; border-radius: 10px; background: rgba(255,255,255,0.04);
