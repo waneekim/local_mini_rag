@@ -2,10 +2,20 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
+// The venv layout differs by platform: Windows puts the interpreter in
+// .venv/Scripts/python.exe, POSIX in .venv/bin/python. Detecting only the
+// POSIX path on Windows silently falls back to a bare `python3` (often the
+// Windows Store shim) that lacks the ingest dependencies.
+export function venvPythonPath(projectRoot) {
+  return process.platform === "win32"
+    ? join(projectRoot, ".venv", "Scripts", "python.exe")
+    : join(projectRoot, ".venv", "bin", "python");
+}
+
 export class WorkerClient {
   constructor({ projectRoot, pythonCommand }) {
     this.projectRoot = projectRoot;
-    const venvPython = join(projectRoot, ".venv", "bin", "python");
+    const venvPython = venvPythonPath(projectRoot);
     this.pythonCommand = pythonCommand || process.env.PYTHON || (existsSync(venvPython) ? venvPython : "python3");
     this.scriptPath = join(projectRoot, "workers", "ingest.py");
   }

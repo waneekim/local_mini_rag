@@ -1,13 +1,14 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { venvPythonPath } from "./workerClient.js";
 
 const DEFAULT_DIMENSIONS = 384;
 
 export class EmbeddingService {
   constructor(options = {}) {
     this.projectRoot = options.projectRoot || process.cwd();
-    const venvPython = join(this.projectRoot, ".venv", "bin", "python");
+    const venvPython = venvPythonPath(this.projectRoot);
     this.pythonCommand = options.pythonCommand || process.env.PYTHON || (existsSync(venvPython) ? venvPython : "python3");
     this.fetchFn = options.fetchFn || globalThis.fetch;
     this.embeddingsUrl = options.embeddingsUrl || process.env.EMBEDDINGS_URL || "";

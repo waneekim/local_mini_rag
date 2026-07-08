@@ -17,6 +17,18 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp"}
 
 
 def main():
+    # Node writes the request as UTF-8 and reads our stdout as UTF-8. On Windows,
+    # Python defaults these streams to the system codepage (e.g. cp949): decoding
+    # stdin as cp949 corrupts non-ASCII file paths (Korean filenames become a
+    # different path → "No such file or directory"), and encoding stdout as cp949
+    # raises UnicodeEncodeError on characters outside it (common in extracted text).
+    try:
+        sys.stdin.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-check", action="store_true")
     args = parser.parse_args()
@@ -227,12 +239,14 @@ def extract_xlsx(file_path, request):
         rows = []
         row_start = None
         row_end = None
-        for row in sheet.iter_rows():
+        # Track the row number via enumerate: in read_only mode blank cells are
+        # EmptyCell objects that have no `.row` attribute, so row[0].row crashes.
+        for row_number, row in enumerate(sheet.iter_rows(), start=1):
             values = [format_cell(cell.value) for cell in row]
             if any(values):
                 if row_start is None:
-                    row_start = row[0].row
-                row_end = row[0].row
+                    row_start = row_number
+                row_end = row_number
                 rows.append(" | ".join(values))
             if len(rows) >= 80:
                 docs.append(unit("\n".join(rows), request, {"format": "xlsx"}, {"sheet": sheet.title, "rowRange": f"{row_start}-{row_end}"}))

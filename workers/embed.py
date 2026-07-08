@@ -4,6 +4,15 @@ import sys
 
 
 def main():
+    # Node pipes UTF-8 in/out; Windows defaults these to cp949, which corrupts
+    # non-ASCII text (e.g. Korean chunks) on read and can crash on write.
+    try:
+        sys.stdin.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
     request = json.loads(sys.stdin.read() or "{}")
     model_name = request.get("model") or "intfloat/multilingual-e5-small"
     texts = request.get("texts") or []
