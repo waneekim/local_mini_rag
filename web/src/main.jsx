@@ -329,7 +329,6 @@ function App() {
         try {
           const payload = JSON.parse(event.data || "{}");
           if (payload.source) mergeSourceUpdate(payload.profileId || pid, payload.source);
-          else loadSources(payload.profileId || pid);
           if (payload.source?.title && payload.source?.status) {
             setStatus(`${payload.source.title} — ${statusLabel(payload.source.status)}`);
           }
@@ -342,7 +341,6 @@ function App() {
           const payload = JSON.parse(event.data || "{}");
           if (payload.message) setStatus(payload.message);
           setJob((current) => current?.id === payload.jobId ? { ...current, status: payload.status, message: payload.message, processed_sources: payload.processedSources, failed_sources: payload.failedSources, total_sources: payload.totalSources } : current);
-          loadSources(payload.profileId || pid);
         } catch {
           // Ignore malformed job frames.
         }

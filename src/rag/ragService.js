@@ -961,10 +961,19 @@ class RagService {
 
   listSources(profileId) {
     this.ensureProfile(profileId);
-    return all(this.db, "SELECT * FROM sources WHERE profile_id = ? ORDER BY created_at DESC", profileId).map((source) => ({
+    return all(this.db, "SELECT * FROM sources WHERE profile_id = ? ORDER BY created_at DESC", profileId).map((source) => this.sourceSnapshot(source));
+  }
+
+  // Row + live chunk count, as sent to the UI (list responses and SSE frames).
+  sourceSnapshot(sourceOrId) {
+    const source = typeof sourceOrId === "string"
+      ? one(this.db, "SELECT * FROM sources WHERE id = ?", sourceOrId)
+      : sourceOrId;
+    if (!source) return null;
+    return {
       ...source,
       chunkCount: one(this.db, "SELECT COUNT(*) AS count FROM chunks WHERE source_id = ?", source.id).count
-    }));
+    };
   }
 
   async addTextSource(profileId, input) {
@@ -1196,7 +1205,7 @@ class RagService {
       created.push(source);
     }
     if (useTree) {
-      const tree = this._addTreeSource(profileId, created);
+      const tree = this._addTreeSource(profileId, created, stat.isDirectory() ? { rootPath: target } : {});
       if (tree) created.push(tree);
     }
     touchProfile(this.db, profileId);
@@ -1206,7 +1215,7 @@ class RagService {
   // Serialize a folder's tree into a Markdown source so the structure itself is
   // indexed and queryable ("어느 폴더에?", "구성 요약"). Skips flat (no-nesting)
   // uploads where a tree adds nothing.
-  _addTreeSource(profileId, sources) {
+  _addTreeSource(profileId, sources, options = {}) {
     const paths = sources.map((s) => s.relative_path).filter((p) => p && p.includes("/"));
     if (paths.length < 1) return null;
     const root = paths[0].split("/")[0] || "folder";
@@ -1224,7 +1233,7 @@ class RagService {
       pasted_text: markdown,
       status: "pending",
       error: "",
-      metadata_json: JSON.stringify({ input: "folder-tree", root, fileCount: paths.length }),
+      metadata_json: JSON.stringify({ input: "folder-tree", root, rootPath: options.rootPath || "", fileCount: paths.length }),
       content_hash: hashText(markdown),
       created_at: at,
       updated_at: at,
@@ -1448,8 +1457,12 @@ class RagService {
     this.ensureProfile(profileId);
     const source = one(this.db, "SELECT * FROM sources WHERE id = ? AND profile_id = ?", sourceId, profileId);
     if (!source) throw Object.assign(new Error("Source not found"), { statusCode: 404 });
-    const url = safeJson(source.metadata_json)?.url;
+    const metadata = safeJson(source.metadata_json);
+    const url = metadata?.url;
     if (source.kind === "url" && url) return { kind: "url", url };
+    if (source.kind === "folder-tree" && metadata.rootPath && existsSync(metadata.rootPath)) {
+      return { kind: "folder", folderPath: metadata.rootPath, text: source.pasted_text, fileName: `${source.title || "folder"}.md` };
+    }
     if (source.file_path && existsSync(source.file_path)) {
       return {
         kind: "file",
@@ -1515,6 +1528,14 @@ class RagService {
   // ── SSE event bus (live job/source progress) ──
   emitProfileEvent(profileId, payload) {
     this.events.emit(String(profileId), { profileId, ...payload, at: nowIso() });
+  }
+
+  // Per-source progress frame (phase: queued/extracting/embedding/indexed/failed)
+  // so the source tree updates live during an index job without full reloads.
+  emitSourceProgress(sourceId, extra = {}) {
+    const source = this.sourceSnapshot(sourceId);
+    if (!source) return;
+    this.emitProfileEvent(source.profile_id, { type: "source", source, ...extra });
   }
 
   subscribeProfile(profileId, handler) {
@@ -1592,13 +1613,19 @@ class RagService {
 
     for (const source of candidates) {
       try {
-        await this.indexSource(source);
+        this.emitSourceProgress(source.id, { phase: "queued", jobId });
+        await this.indexSource(source, { jobId });
         processed += 1;
         updateJob(this.db, jobId, {
           status: "running",
           message: `Indexed ${processed}/${candidates.length}`,
           processed_sources: processed,
           failed_sources: failed
+        });
+        this.emitProfileEvent(profileId, {
+          type: "job", jobId, jobType: "index", status: "running",
+          message: `Indexed ${processed}/${candidates.length}`,
+          totalSources: candidates.length, processedSources: processed, failedSources: failed
         });
       } catch (error) {
         failed += 1;
@@ -1611,18 +1638,19 @@ class RagService {
           nowIso(),
           source.id
         );
+        this.emitSourceProgress(source.id, { phase: "failed", jobId, error: error.message });
         updateJob(this.db, jobId, {
           status: "running",
           message: `Indexed ${processed}/${candidates.length}`,
           processed_sources: processed,
           failed_sources: failed
         });
+        this.emitProfileEvent(profileId, {
+          type: "job", jobId, jobType: "index", status: "running",
+          message: `Indexed ${processed}/${candidates.length}`,
+          totalSources: candidates.length, processedSources: processed, failedSources: failed
+        });
       }
-      this.emitProfileEvent(profileId, {
-        type: "job", jobId, jobType: "index", status: "running",
-        message: `Indexed ${processed}/${candidates.length}`,
-        totalSources: candidates.length, processedSources: processed, failedSources: failed
-      });
     }
 
     updateJob(this.db, jobId, {
@@ -1640,9 +1668,10 @@ class RagService {
     touchProfile(this.db, profileId);
   }
 
-  async indexSource(source) {
+  async indexSource(source, { jobId = "" } = {}) {
     run(this.db, "DELETE FROM chunks WHERE source_id = ?", source.id);
     run(this.db, "UPDATE sources SET status = ?, error = ?, updated_at = ? WHERE id = ?", "extracting", "", nowIso(), source.id);
+    this.emitSourceProgress(source.id, { phase: "extracting", jobId });
 
     // Prefer the preprocessing agent's reviewed Markdown when present: skip the
     // raw extractor and chunk the clean, structure-preserving text instead.
@@ -1670,6 +1699,7 @@ class RagService {
     if (!chunks.length) throw new Error("No indexable text extracted");
 
     run(this.db, "UPDATE sources SET status = ?, updated_at = ? WHERE id = ?", "embedding", nowIso(), source.id);
+    this.emitSourceProgress(source.id, { phase: "embedding", jobId, chunkCount: chunks.length });
     // Contextual retrieval: embed each chunk together with a short header (source
     // title + locator/section) so short queries match the right document, but
     // store the original text so citations stay clean.
@@ -1728,6 +1758,7 @@ class RagService {
       }),
       source.id
     );
+    this.emitSourceProgress(source.id, { phase: "indexed", jobId, chunkCount: chunks.length });
   }
 
   async search(profileId, input) {

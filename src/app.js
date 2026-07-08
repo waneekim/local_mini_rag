@@ -3,6 +3,7 @@ import Fastify from "fastify";
 import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import { createReadStream, existsSync, statSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { mkdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +16,37 @@ import { extractGaussModels, extractGaussModelIds, gaussHeaders, gaussModelsUrl 
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, "..");
+
+// Open a source's original file/folder/URL with the OS default handler.
+function openWithDefaultApp(target, kind) {
+  return new Promise((resolve, reject) => {
+    let command;
+    let args;
+    if (process.platform === "win32") {
+      if (kind === "folder") {
+        command = "explorer.exe";
+        args = [target];
+      } else {
+        command = "powershell.exe";
+        const script = kind === "url" ? "Start-Process -FilePath $args[0]" : "Start-Process -LiteralPath $args[0]";
+        args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script, target];
+      }
+    } else if (process.platform === "darwin") {
+      command = "open";
+      args = [target];
+    } else {
+      command = "xdg-open";
+      args = [target];
+    }
+
+    const child = spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
+}
 
 export async function createApp(options = {}) {
   const dataDir = options.dataDir || process.env.RAG_DATA_DIR || join(projectRoot, "data");
@@ -257,11 +289,27 @@ export async function createApp(options = {}) {
   app.get("/api/profiles/:profileId/sources/:sourceId/raw", async (request, reply) => {
     const target = rag.getSourceFile(request.params.profileId, request.params.sourceId);
     if (target.kind === "url") return reply.redirect(target.url);
-    if (target.kind === "text") {
-      return reply.type("text/plain; charset=utf-8").send(target.text);
-    }
+    if (target.kind === "text") return reply.type("text/plain; charset=utf-8").send(target.text);
+    if (target.kind === "folder") return reply.type("text/plain; charset=utf-8").send(target.text || target.folderPath);
     reply.header("content-disposition", `inline; filename*=UTF-8''${encodeURIComponent(target.fileName)}`);
     return reply.type(target.mimeType).send(createReadStream(target.filePath));
+  });
+
+  // Open the source's original (file/folder/URL) on the server machine with the
+  // OS default app; the UI falls back to /raw when opening is not possible.
+  app.post("/api/profiles/:profileId/sources/:sourceId/open", async (request, reply) => {
+    const fallbackUrl = `/api/profiles/${request.params.profileId}/sources/${request.params.sourceId}/raw`;
+    const target = rag.getSourceFile(request.params.profileId, request.params.sourceId);
+    if (target.kind === "text") return { ok: false, fallbackUrl };
+
+    const value = target.kind === "url" ? target.url : target.kind === "folder" ? target.folderPath : target.filePath;
+    try {
+      await openWithDefaultApp(value, target.kind);
+      return { ok: true, kind: target.kind };
+    } catch (error) {
+      request.log.warn({ err: error }, "failed to open source with default app");
+      return reply.code(202).send({ ok: false, fallbackUrl });
+    }
   });
 
   // Preprocessing agent: structure sources into reviewable Markdown before indexing.
