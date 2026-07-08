@@ -12,6 +12,7 @@
     "build": "vite build",
     "test": "node --test tests/*.test.js",
     "eval:rag": "node scripts/eval-rag.js",
+    "crawl:confluence": "node scripts/crawl-confluence.mjs",
     "desktop": "npm run build && electron .",
     "desktop:dist:win": "npm run build && electron-builder --win",
     "desktop:dist:mac": "npm run build && electron-builder --mac",

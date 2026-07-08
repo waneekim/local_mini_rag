@@ -14,3 +14,6 @@ skills/*
 
 # 회사 버전(AgentRAGKnowledge) 비교 참조 — 절대 커밋 금지
 .company-ref/
+
+# Confluence 크롤러 출력물
+crawled_confluence/
