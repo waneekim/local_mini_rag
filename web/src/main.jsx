@@ -3323,9 +3323,30 @@ function App() {
                       <button
                         type="button"
                         className="tool"
+                        title="스킬 실행 (직전 답변 가공)"
+                        aria-label="스킬"
+                        onClick={(e) => { e.stopPropagation(); setPersonaMenuOpen(false); setSkillMenuOpen((o) => !o); }}
+                      >
+                        <Sparkles size={16} />
+                      </button>
+                      {skillMenuOpen && (
+                        <div className="composer-menu">
+                          {skills.length ? skills.map((skill) => (
+                            <button key={skill.name} type="button" onClick={() => { setSkillMenuOpen(false); void runSkill(skill); }}>
+                              <strong>{skill.name}</strong>
+                              <span>{skill.description || "스킬"}</span>
+                            </button>
+                          )) : <p className="empty tiny">설치된 스킬 없음 · 설정 &gt; 스킬</p>}
+                        </div>
+                      )}
+                    </div>
+                    <div className="composer-menu-wrap">
+                      <button
+                        type="button"
+                        className="tool"
                         title="페르소나 추가"
                         aria-label="페르소나 추가"
-                        onClick={() => { setSkillMenuOpen(false); setPersonaMenuOpen((o) => !o); }}
+                        onClick={(e) => { e.stopPropagation(); setSkillMenuOpen(false); setPersonaMenuOpen((o) => !o); }}
                       >
                         <Plus size={16} />
                       </button>
