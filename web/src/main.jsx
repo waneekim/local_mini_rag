@@ -294,7 +294,7 @@ function App() {
 
   useEffect(() => {
     function onClick() { setMenu(null); }
-    function onKey(e) { if (e.key === "Escape") { setMenu(null); setTextDialog(null); setUrlDialog(null); setCrop(null); setDragRect(null); } }
+    function onKey(e) { if (e.key === "Escape") { setMenu(null); setSourceModal(null); setCrop(null); setDragRect(null); } }
     // Paste a screenshot image anywhere in the app → extract text (native ⌃⌘⇧4 → ⌘V).
     function onPaste(e) {
       const item = [...(e.clipboardData?.items || [])].find((it) => it.type.startsWith("image/"));
