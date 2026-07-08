@@ -136,9 +136,7 @@ function App() {
   // Folder tree: when adding a folder, also index its structure as a source.
   const [folderTree, setFolderTree] = useState(() => localStorage.getItem("rag.folderTree") === "1");
   const [editingMode, setEditingMode] = useState(null); // mode being edited/created in settings
-  const [crop, setCrop] = useState(null); // { src, w, h } captured screenshot to crop
-  const [attachments, setAttachments] = useState([]); // pasted/captured image data URLs sent with the next prompt
-  const [dragRect, setDragRect] = useState(null); // selection rect in client coords
+  const [attachments, setAttachments] = useState([]); // pasted image data URLs sent with the next prompt (vision)
   const [manualCompact, setManualCompact] = useState(() => {
     const p = new URLSearchParams(window.location.search).get("compact");
     if (p === "1") return true;
@@ -238,8 +236,6 @@ function App() {
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const highlightRef = useRef(null);
-  const cropImgRef = useRef(null);
-  const dragStartRef = useRef(null);
 
   const activeProfile = useMemo(
     () => profiles.find((p) => p.id === activeProfileId),
@@ -316,7 +312,7 @@ function App() {
 
   useEffect(() => {
     function onClick() { setMenu(null); }
-    function onKey(e) { if (e.key === "Escape") { setMenu(null); setSourceModal(null); setCrop(null); setDragRect(null); } }
+    function onKey(e) { if (e.key === "Escape") { setMenu(null); setSourceModal(null); } }
     // Paste a screenshot image anywhere in the app → extract text (native ⌃⌘⇧4 → ⌘V).
     function onPaste(e) {
       const item = [...(e.clipboardData?.items || [])].find((it) => it.type.startsWith("image/"));
@@ -971,69 +967,6 @@ function App() {
   function removeAttachment(index) {
     setAttachments((prev) => prev.filter((_, i) => i !== index));
   }
-
-  async function captureScreenshot() {
-    if (!navigator.mediaDevices?.getDisplayMedia) {
-      window.alert("이 브라우저는 화면 캡처를 지원하지 않습니다. 대신 스크린샷을 복사해 붙여넣으세요(⌘V).");
-      return;
-    }
-    let stream;
-    try {
-      stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-    } catch {
-      return; // user cancelled
-    }
-    const video = document.createElement("video");
-    video.srcObject = stream;
-    await video.play();
-    const w = video.videoWidth;
-    const h = video.videoHeight;
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    canvas.getContext("2d").drawImage(video, 0, 0, w, h);
-    stream.getTracks().forEach((t) => t.stop());
-    setCrop({ src: canvas.toDataURL("image/png"), w, h });
-  }
-
-  function onCropDown(e) {
-    dragStartRef.current = { x: e.clientX, y: e.clientY };
-    setDragRect({ x: e.clientX, y: e.clientY, w: 0, h: 0 });
-  }
-
-  function onCropMove(e) {
-    const s = dragStartRef.current;
-    if (!s) return;
-    setDragRect({ x: Math.min(s.x, e.clientX), y: Math.min(s.y, e.clientY), w: Math.abs(e.clientX - s.x), h: Math.abs(e.clientY - s.y) });
-  }
-
-  async function onCropUp() {
-    const rect = dragRect;
-    dragStartRef.current = null;
-    if (!rect || rect.w < 5 || rect.h < 5 || !cropImgRef.current) {
-      setDragRect(null);
-      return;
-    }
-    const b = cropImgRef.current.getBoundingClientRect();
-    const scaleX = crop.w / b.width;
-    const scaleY = crop.h / b.height;
-    const sx = Math.max(0, (rect.x - b.left) * scaleX);
-    const sy = Math.max(0, (rect.y - b.top) * scaleY);
-    const sw = Math.min(crop.w - sx, rect.w * scaleX);
-    const sh = Math.min(crop.h - sy, rect.h * scaleY);
-    const src = crop.src;
-    setDragRect(null);
-    setCrop(null);
-    const img = new Image();
-    img.src = src;
-    await img.decode();
-    const c = document.createElement("canvas");
-    c.width = Math.round(sw);
-    c.height = Math.round(sh);
-    c.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
-    await attachImage(c.toDataURL("image/png"));
-  }
-
 
   function toggleAutoIndex(value) {
     const next = typeof value === "boolean" ? value : !autoIndex;
@@ -2060,16 +1993,6 @@ function App() {
 
   return (
     <main className={`shell ${compact ? "compact" : ""}`} style={{ "--sidebar-w": `${sidebarWidth}px`, "--citations-w": `${citationsWidth}px` }}>
-      {/* Screenshot crop overlay */}
-      {crop && (
-        <div className="crop-overlay" onMouseDown={onCropDown} onMouseMove={onCropMove} onMouseUp={onCropUp}>
-          <img ref={cropImgRef} src={crop.src} className="crop-img" draggable={false} alt="screenshot" />
-          {dragRect && (
-            <div className="crop-sel" style={{ left: dragRect.x, top: dragRect.y, width: dragRect.w, height: dragRect.h }} />
-          )}
-          <div className="crop-hint">드래그해서 검증할 영역을 선택하세요 · Esc 취소</div>
-        </div>
-      )}
 
       {/* Hidden file inputs */}
       <input ref={fileInputRef} type="file" multiple hidden accept={ACCEPTED_FILE_TYPES} onChange={(e) => uploadEntries(fileListToEntries(e.target.files), uploadTargetRef.current)} />
@@ -3375,11 +3298,7 @@ function App() {
                   />
                 </div>
                 <div className="composer-bar">
-                  <div className="input-tools">
-                    {/* Chat-only tool: attach an image to the prompt. Source-add
-                        tools live in the left panel next to the sources. */}
-                    <button className="tool" type="button" title="이미지 첨부 · 클릭=화면 공유 후 영역선택 / 또는 스크린샷 복사 후 ⌘V 붙여넣기 → 프롬프트와 함께 비전 모델로 전송" onClick={captureScreenshot}><Camera size={16} /></button>
-                  </div>
+                  <div className="input-tools" />
                   <button type="button" onClick={runChat} disabled={busy || (!query.trim() && !attachments.length)} aria-label="전송" className="send-btn">
                     <Send size={18} />
                   </button>
