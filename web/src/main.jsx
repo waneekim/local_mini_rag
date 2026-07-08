@@ -45,6 +45,18 @@ marked.setOptions({ gfm: true, breaks: true });
 
 const API = "";
 
+// Friendly display names for known Gauss model ids (the API returns bare ids).
+const GAUSS_MODEL_NAMES = {
+  "0197b0c8-4711-7555-b086-6e4e920d8a4e": "Gauss",
+  "01988e50-ee82-7e59-8e74-814043536522": "GaussO Think",
+  "0198ebef-43e7-7b10-bdb4-287d66e0d8d9": "GaussO Flash",
+  "019e6e73-cbe1-7502-b2ee-68af15b3b37b": "Gemma 4",
+  "019f27d3-e606-7ed2-92e9-c49d5cfe1370": "Gemma4",
+  "019db9ba-17a7-7dab-b058-257861a86d22": "Gauss Think",
+  "019e6e79-d29b-7d83-bc48-ac2c0609bb62": "GaussO Think (Beta)",
+  "01988e4f-ac3d-7e6d-b1f2-950364057a30": "GaussO"
+};
+
 const ACCEPTED_FILE_TYPES =
   ".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xlsm,.xls,.txt,.md,.csv,.json,.html,.htm,.log,.png,.jpg,.jpeg,.tif,.tiff,.webp,.bmp";
 
@@ -149,6 +161,7 @@ function App() {
   });
   const [narrow, setNarrow] = useState(() => window.innerWidth < 900);
   const compact = manualCompact || narrow; // a narrow window auto-compacts
+  const loadedProfileIds = useMemo(() => Object.keys(sourcesByProfile).sort().join("|"), [sourcesByProfile]);
 
   function toggleCompact() {
     setManualCompact((v) => {
@@ -186,6 +199,9 @@ function App() {
   const [advancedSettings, setAdvancedSettings] = useState(false);
   const [quickKey, setQuickKey] = useState("");
   const [connTest, setConnTest] = useState(null); // null | {busy:true} | {llm:{ok,detail}, embedding:{ok,detail}}
+  const [connBusy, setConnBusy] = useState(false);
+  const [gaussModels, setGaussModels] = useState([]);
+  const [gaussModelStatus, setGaussModelStatus] = useState("");
   const [defaultMode, setDefaultMode] = useState(() => localStorage.getItem("rag.defaultMode") || "");
   // "내 PC에 설치" guide + offline bundle download (/api/download/*).
   const [installOpen, setInstallOpen] = useState(false);
@@ -299,23 +315,44 @@ function App() {
     }
   }, [agentFilter, profiles]);
 
-  // Live progress via SSE: subscribe to the active agent's event stream and
-  // refresh its source tree as indexing jobs advance (no polling needed). The
-  // stream is best-effort — if it drops, the existing job polling still works.
+  // Live progress via SSE (company behavior): subscribe to every loaded
+  // agent's event stream, merge per-source updates in place and mirror job
+  // progress into the status line. Best-effort — if a stream drops, the
+  // existing job polling still refreshes everything.
   useEffect(() => {
-    if (!activeProfileId) return;
-    let es;
-    try {
-      es = new EventSource(`${API}/api/profiles/${activeProfileId}/events`);
-    } catch {
-      return;
-    }
-    const onJob = () => loadSources(activeProfileId);
-    es.addEventListener("job", onJob);
-    es.addEventListener("source", onJob);
-    es.onerror = () => { /* browser auto-reconnects; ignore transient drops */ };
-    return () => { es.close(); };
-  }, [activeProfileId]);
+    const ids = loadedProfileIds ? loadedProfileIds.split("|").filter(Boolean) : [];
+    if (!ids.length || typeof EventSource === "undefined") return undefined;
+    const streams = ids.map((pid) => {
+      const stream = new EventSource(`${API}/api/profiles/${pid}/events`);
+      stream.addEventListener("source", (event) => {
+        try {
+          const payload = JSON.parse(event.data || "{}");
+          if (payload.source) mergeSourceUpdate(payload.profileId || pid, payload.source);
+          else loadSources(payload.profileId || pid);
+          if (payload.source?.title && payload.source?.status) {
+            setStatus(`${payload.source.title} — ${statusLabel(payload.source.status)}`);
+          }
+        } catch {
+          // Ignore malformed SSE frames; the polling fallback still refreshes jobs.
+        }
+      });
+      stream.addEventListener("job", (event) => {
+        try {
+          const payload = JSON.parse(event.data || "{}");
+          if (payload.message) setStatus(payload.message);
+          setJob((current) => current?.id === payload.jobId ? { ...current, status: payload.status, message: payload.message, processed_sources: payload.processedSources, failed_sources: payload.failedSources, total_sources: payload.totalSources } : current);
+          loadSources(payload.profileId || pid);
+        } catch {
+          // Ignore malformed job frames.
+        }
+      });
+      stream.onerror = () => {
+        // EventSource retries automatically; keep the UI state from the last good event.
+      };
+      return stream;
+    });
+    return () => streams.forEach((stream) => stream.close());
+  }, [loadedProfileIds]);
 
   useEffect(() => {
     function onClick() { setMenu(null); setPersonaMenuOpen(false); setSkillMenuOpen(false); }
@@ -409,15 +446,24 @@ function App() {
   async function commitRename() {
     const id = editingId;
     const name = editingName.trim();
-    setEditingId("");
     const profile = profiles.find((p) => p.id === id);
-    if (!id || !name || (profile && profile.name === name)) return;
-    const updated = await fetchJson(`/api/profiles/${id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name })
-    });
-    setProfiles((prev) => prev.map((p) => (p.id === id ? updated : p)));
+    if (!id || !name || (profile && profile.name === name)) {
+      setEditingId("");
+      return;
+    }
+    try {
+      const updated = await fetchJson(`/api/profiles/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name })
+      });
+      setProfiles((prev) => prev.map((p) => (p.id === id ? updated : p)));
+      setEditingId("");
+    } catch (error) {
+      setEditingId(id);
+      setEditingName(name);
+      setStatus(`Agent 이름 수정 실패: ${error.message}`);
+    }
   }
 
   async function deleteProfile(p, e) {
@@ -846,6 +892,19 @@ function App() {
     const pid = fbModal?.profileId;
     await fetchJson(`/api/profiles/${pid}/feedback/${fbId}`, { method: "DELETE" });
     setFeedbackList((prev) => prev.filter((f) => f.id !== fbId));
+  }
+
+  // Merge one SSE source update into the loaded list without a full reload.
+  function mergeSourceUpdate(profileId, source) {
+    if (!profileId || !source?.id) return;
+    setSourcesByProfile((prev) => {
+      const list = prev[profileId];
+      if (!list) return prev;
+      const index = list.findIndex((item) => item.id === source.id);
+      const nextList = index >= 0 ? [...list] : [source, ...list];
+      if (index >= 0) nextList[index] = { ...nextList[index], ...source };
+      return { ...prev, [profileId]: nextList };
+    });
   }
 
   async function loadSources(pid) {
@@ -1882,28 +1941,51 @@ function App() {
   // ── Settings ──
 
   function loadPresetIntoForm(state, name) {
-    const target = state.presets[name] || Object.values(state.presets)[0] || { llm: {}, embedding: {} };
-    setPresetName(name);
-    setSettingsForm({ llm: { ...target.llm }, embedding: { ...target.embedding } });
+    const presets = state?.presets || {};
+    const target = presets[name] || Object.values(presets)[0] || { llm: {}, embedding: {} };
+    setPresetName(name || state?.activePreset || Object.keys(presets)[0] || "default");
+    setSettingsForm(normalizeSettingsForm(target));
   }
 
   async function openSettings() {
-    const [state, skillCfg] = await Promise.all([
-      fetchJson("/api/settings"),
-      fetchJson("/api/skills/config").catch(() => ({ repo: "" }))
-    ]);
-    setSettingsState(state);
-    loadPresetIntoForm(state, state.activePreset);
-    // Simple view first: seed the one-field key input from the active preset.
-    const active = state.presets[state.activePreset] || Object.values(state.presets)[0] || {};
-    setQuickKey(active.llm?.apiKey || "");
-    setConnTest(null);
-    setAdvancedSettings(false);
-    setSkillRepo(skillCfg.repo || "");
-    setAvailableSkills([]);
-    setEditingMode(null);
-    loadSkills();
-    setSettingsOpen(true);
+    try {
+      const [state, skillCfg] = await Promise.all([
+        fetchJson("/api/settings"),
+        fetchJson("/api/skills/config").catch(() => ({ repo: "" }))
+      ]);
+      const presets = state?.presets || {};
+      const activeName = state?.activePreset || Object.keys(presets)[0] || "default";
+      const active = presets[activeName] || Object.values(presets)[0] || {};
+      const form = normalizeSettingsForm(active);
+      setSettingsState(normalizeSettingsState({ activePreset: activeName, presets }));
+      setPresetName(activeName);
+      setSettingsForm(form);
+      setQuickKey(form.llm.apiKey || "");
+      setConnTest(null);
+      setConnBusy(false);
+      setAdvancedSettings(false);
+      setSkillRepo(skillCfg.repo || "");
+      setAvailableSkills([]);
+      setEditingMode(null);
+      setGaussModels([]);
+      setGaussModelStatus("");
+      if (form.llm.provider === "gauss-openapi") {
+        setGaussModelStatus("모델 목록 불러오는 중…");
+        fetchJson("/api/settings/gauss/models", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ llm: form.llm })
+        }).then((result) => {
+          setConnTest((prev) => ({ ...(prev || {}), llm: result }));
+          storeGaussModels(result);
+        }).catch((e) => setGaussModelStatus(e.message));
+      }
+      loadSkills();
+      setSettingsOpen(true);
+    } catch (e) {
+      setStatus(`설정 로드 실패: ${e.message}`);
+      window.alert(`설정 로드 실패: ${e.message}`);
+    }
   }
 
   async function loadSkills() {
@@ -1935,33 +2017,103 @@ function App() {
   // ── Simple settings: one-key connect + persona quick manager ──
 
   async function quickConnect() {
+    if (!settingsForm) return;
+    const isGauss = settingsForm.llm?.provider === "gauss-openapi";
     const key = quickKey.trim();
-    // One key powers both LLM and embeddings unless embeddings already has its own.
-    const form = {
-      ...settingsForm,
-      llm: { ...settingsForm.llm, apiKey: key },
-      embedding: { ...settingsForm.embedding, apiKey: settingsForm.embedding.apiKey || key }
-    };
+    const currentForm = normalizeSettingsForm(settingsForm);
+    // One key powers both LLM and embeddings unless embeddings already has its
+    // own; Gauss ignores the key field and uses its saved tokens.
+    const form = isGauss
+      ? currentForm
+      : {
+          ...currentForm,
+          llm: { ...currentForm.llm, apiKey: key },
+          embedding: { ...currentForm.embedding, apiKey: currentForm.embedding.apiKey || key }
+        };
     setSettingsForm(form);
+    setConnBusy(true);
     setConnTest({ busy: true });
     try {
       const state = await fetchJson("/api/settings", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: presetName || settingsState.activePreset || "기본", ...form })
+        body: JSON.stringify({ name: presetName || settingsState?.activePreset || "기본", ...form })
       });
-      setSettingsState(state);
+      setSettingsState(normalizeSettingsState(state));
       const result = await fetchJson("/api/settings/test", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(form)
       });
       setConnTest(result);
+      storeGaussModels(result);
       const ok = result.llm?.ok && result.embedding?.ok;
       setStatus(ok ? "연결 완료 — 바로 대화를 시작할 수 있습니다" : "연결 확인 실패 — 메시지를 확인하세요");
-      if (ok) boot(); // refresh health/model badge
+      setHealth(await fetchJson("/v1/health"));
     } catch (e) {
-      setConnTest({ llm: { ok: false, detail: e.message }, embedding: { ok: false, detail: "" } });
+      setConnTest({ error: e.message, llm: { ok: false, detail: e.message }, embedding: { ok: false, detail: "" } });
+    } finally {
+      setConnBusy(false);
+    }
+  }
+
+  function storeGaussModels(result) {
+    const list = Array.isArray(result?.llm?.models)
+      ? result.llm.models
+      : Array.isArray(result?.models)
+        ? result.models
+        : [];
+    if (list.length) {
+      setGaussModels(list);
+      setGaussModelStatus(`모델 ${list.length}개 로드됨`);
+    } else if (result?.llm?.detail || result?.detail) {
+      setGaussModelStatus(result.llm?.detail || result.detail);
+    }
+  }
+
+  async function loadGaussModels() {
+    if (!settingsForm) return;
+    setConnBusy(true);
+    setGaussModelStatus("모델 목록 불러오는 중…");
+    try {
+      const result = await fetchJson("/api/settings/gauss/models", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ llm: settingsForm.llm || {} })
+      });
+      setConnTest((prev) => ({ ...(prev || {}), llm: result }));
+      storeGaussModels(result);
+      if (result.ok && result.models?.length && !normalizeSettingsForm(settingsForm).llm.model) {
+        setLlmField("model", result.models[0].id);
+      }
+      setStatus(result.ok ? "Gauss 모델 목록 로드됨" : "Gauss 모델 로드 실패");
+    } catch (e) {
+      setGaussModelStatus(e.message);
+      setConnTest((prev) => ({ ...(prev || {}), llm: { ok: false, detail: e.message, models: [] } }));
+      setStatus(`Gauss 모델 로드 실패: ${e.message}`);
+    } finally {
+      setConnBusy(false);
+    }
+  }
+
+  async function testSettings() {
+    if (!settingsForm) return;
+    setConnBusy(true);
+    setConnTest(null);
+    try {
+      const result = await fetchJson("/api/settings/test", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(settingsForm)
+      });
+      setConnTest(result);
+      storeGaussModels(result);
+      setStatus("연결 테스트 완료");
+    } catch (e) {
+      setConnTest({ error: e.message });
+      setStatus(`연결 테스트 실패: ${e.message}`);
+    } finally {
+      setConnBusy(false);
     }
   }
 
@@ -2105,10 +2257,7 @@ function App() {
       if (!newName?.trim()) return;
       // start an empty form under the new name without persisting yet
       setPresetName(newName.trim());
-      setSettingsForm({
-        llm: { provider: "openai-compatible", baseUrl: "", model: "", apiKey: "" },
-        embedding: { backend: "http", url: "", model: "", dimensions: null, apiKey: "" }
-      });
+      setSettingsForm(normalizeSettingsForm({}));
       return;
     }
     const state = await fetchJson("/api/settings/select", {
@@ -2116,7 +2265,7 @@ function App() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name })
     });
-    setSettingsState(state);
+    setSettingsState(normalizeSettingsState(state));
     loadPresetIntoForm(state, name);
     setHealth(await fetchJson("/v1/health"));
     setStatus(`프리셋 전환: ${name}`);
@@ -2128,7 +2277,7 @@ function App() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name: presetName, ...settingsForm })
     });
-    setSettingsState(state);
+    setSettingsState(normalizeSettingsState(state));
     setSettingsOpen(false);
     setHealth(await fetchJson("/v1/health"));
     setStatus(`설정 저장됨: ${presetName}`);
@@ -2137,14 +2286,27 @@ function App() {
   async function deletePreset() {
     if (!window.confirm(`프리셋 '${presetName}'을 삭제할까요?`)) return;
     const state = await fetchJson(`/api/settings/${encodeURIComponent(presetName)}`, { method: "DELETE" });
-    setSettingsState(state);
+    setSettingsState(normalizeSettingsState(state));
     loadPresetIntoForm(state, state.activePreset);
     setHealth(await fetchJson("/v1/health"));
     setStatus("프리셋 삭제됨");
   }
 
-  const setLlmField = (key, value) => setSettingsForm((f) => ({ ...f, llm: { ...f.llm, [key]: value } }));
-  const setEmbField = (key, value) => setSettingsForm((f) => ({ ...f, embedding: { ...f.embedding, [key]: value } }));
+  const setLlmField = (key, value) => {
+    setSettingsForm((f) => {
+      const form = normalizeSettingsForm(f);
+      return { ...form, llm: { ...form.llm, [key]: value } };
+    });
+    // A provider/token change invalidates the loaded Gauss model list.
+    if (["provider", "baseUrl", "gaussClientToken", "gaussOpenapiToken", "gaussUserEmail"].includes(key)) {
+      setGaussModels([]);
+      setGaussModelStatus("");
+    }
+  };
+  const setEmbField = (key, value) => setSettingsForm((f) => {
+    const form = normalizeSettingsForm(f);
+    return { ...form, embedding: { ...form.embedding, [key]: value } };
+  });
 
   // ── Resizers ──
 
@@ -2241,6 +2403,8 @@ function App() {
               <button onClick={() => { openGlossary(menu.pid); setMenu(null); }}><BookOpen size={14} />용어집(단어 사전)</button>
               <button onClick={() => { openConcepts(menu.pid); setMenu(null); }}><Network size={14} />의미 사전(동의어·맥락)</button>
               <button onClick={() => { openFeedback(menu.pid); setMenu(null); }}><ThumbsUp size={14} />피드백 학습</button>
+              <button onClick={(e) => { const p = profiles.find((x) => x.id === menu.pid); if (p) startRename(p, e); setMenu(null); }}><Pencil size={14} />이름 수정</button>
+              <button className="danger" onClick={(e) => { const p = profiles.find((x) => x.id === menu.pid); if (p) deleteProfile(p, e); setMenu(null); }}><Trash2 size={14} />삭제</button>
             </>
           ) : (
             <>
@@ -2876,19 +3040,28 @@ function App() {
                     <span className="quick-server-name">{presetName || settingsState.activePreset}</span>
                     <span className="optional">{settingsForm.llm.model || "모델 미지정"} · {settingsForm.llm.baseUrl || "서버 미지정"}</span>
                   </div>
-                  <div className="skill-repo-row">
-                    <input
-                      type="password"
-                      value={quickKey}
-                      onChange={(e) => setQuickKey(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter") quickConnect(); }}
-                      placeholder="API Key 붙여넣기 (없는 서버면 비워두고 연결)"
-                      autoFocus
-                    />
-                    <button type="button" onClick={quickConnect} disabled={connTest?.busy}>
-                      {connTest?.busy ? "확인 중…" : "연결하기"}
-                    </button>
-                  </div>
+                  {settingsForm.llm?.provider === "gauss-openapi" ? (
+                    <div className="skill-repo-row">
+                      <span className="optional">Gauss는 저장된 클라이언트 토큰·OpenAPI 토큰·이메일로 연결합니다.</span>
+                      <button type="button" onClick={quickConnect} disabled={connBusy}>
+                        {connBusy ? "확인 중…" : "연결하기"}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="skill-repo-row">
+                      <input
+                        type="password"
+                        value={quickKey}
+                        onChange={(e) => setQuickKey(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") quickConnect(); }}
+                        placeholder="API Key 붙여넣기 (없는 서버면 비워두고 연결)"
+                        autoFocus
+                      />
+                      <button type="button" onClick={quickConnect} disabled={connBusy}>
+                        {connBusy ? "확인 중…" : "연결하기"}
+                      </button>
+                    </div>
+                  )}
                   {connTest && !connTest.busy && (
                     <div className="conn-results">
                       <div className={`conn-row ${connTest.llm?.ok ? "ok" : "bad"}`}>
@@ -2991,7 +3164,22 @@ function App() {
                   </select>
                 </label>
                 <label>서버 URL<input value={settingsForm.llm.baseUrl || ""} onChange={(e) => setLlmField("baseUrl", e.target.value)} placeholder={settingsForm.llm.provider === "gauss-openapi" ? "https://genai-openapi.sec.samsung.net/.../api-chat" : "http://localhost:1234/v1"} /></label>
-                <label>모델{settingsForm.llm.provider === "gauss-openapi" ? " ID" : "명"}<input value={settingsForm.llm.model || ""} onChange={(e) => setLlmField("model", e.target.value)} placeholder={settingsForm.llm.provider === "gauss-openapi" ? "0196f1fc-…-74dbddb971d0" : "qwen2.5-14b-instruct"} /></label>
+                {settingsForm.llm.provider === "gauss-openapi" ? (
+                  <label>모델
+                    <select className="model-select" value={settingsForm.llm.model || ""} onChange={(e) => setLlmField("model", e.target.value)}>
+                      {!settingsForm.llm.model && <option value="">Gauss 모델 선택</option>}
+                      {mergeGaussModelOptions(settingsForm.llm.model, gaussModels.length ? gaussModels : connTest?.llm?.models).map((model) => (
+                        <option key={model.id} value={model.id}>{gaussModelLabel(model)}</option>
+                      ))}
+                    </select>
+                    <div className="field-actions">
+                      <button type="button" className="secondary mini-btn" onClick={loadGaussModels} disabled={connBusy}>모델 목록 불러오기</button>
+                      {gaussModelStatus && <span className="optional">{gaussModelStatus}</span>}
+                    </div>
+                  </label>
+                ) : (
+                  <label>모델명<input value={settingsForm.llm.model || ""} onChange={(e) => setLlmField("model", e.target.value)} placeholder="qwen2.5-14b-instruct" /></label>
+                )}
                 {settingsForm.llm.provider !== "gauss-openapi" && (
                   <label>비전 모델 <span className="optional">(선택)</span><input value={settingsForm.llm.visionModel || ""} onChange={(e) => setLlmField("visionModel", e.target.value)} placeholder="qwen2-vl-7b-instruct" /></label>
                 )}
@@ -3003,6 +3191,19 @@ function App() {
                     <label>Gauss User Email<input value={settingsForm.llm.gaussUserEmail || ""} onChange={(e) => setLlmField("gaussUserEmail", e.target.value)} placeholder="name@samsung.com" /></label>
                     <p className="settings-note optional">Gauss는 chat 전용입니다 — 이미지/비전은 지원하지 않으며, 임베딩은 아래 임베딩 서버를 별도로 씁니다.</p>
                   </>
+                )}
+              </div>
+              <div className="connection-test">
+                <button type="button" className="secondary mini-btn" onClick={testSettings} disabled={connBusy}>{connBusy ? "테스트 중…" : "연결 테스트"}</button>
+                {connTest && !connTest.busy && (
+                  connTest.error ? (
+                    <span className="conn-pill fail">{connTest.error}</span>
+                  ) : (
+                    <>
+                      <span className={`conn-pill ${connTest.llm?.ok ? "ok" : "fail"}`}>LLM {connTest.llm?.ok ? "OK" : connTest.llm?.error || "실패"}</span>
+                      <span className={`conn-pill ${connTest.embedding?.ok ? "ok" : "fail"}`}>임베딩 {connTest.embedding?.ok ? "OK" : connTest.embedding?.error || "실패"}</span>
+                    </>
+                  )
                 )}
               </div>
             </div>
@@ -3174,7 +3375,7 @@ function App() {
           <div className="brand-text">
             <h1 title="Agent RAG Knowledge">ARK</h1>
             <p className="brand-full">Agent RAG Knowledge</p>
-            <p className="brand-model">{health?.llmProvider?.model || health?.llmProvider?.provider || "checking"}</p>
+            <p className="brand-model">{displayLlmModel(health?.llmProvider, gaussModels.length ? gaussModels : connTest?.llm?.models)}</p>
           </div>
           {/* Minimal background-work signal: a pulsing dot, details on hover only. */}
           {(busy || (job && !["completed", "completed_with_errors", "failed"].includes(job.status))) && (
@@ -3194,14 +3395,9 @@ function App() {
           </button>
         </div>
 
-        <div className="agent-toolbar">
-          <span className="agent-toolbar-label">Agents</span>
-          <button className="icon-button" type="button" title="Agent 추가" onClick={createProfile}><Plus size={18} /></button>
-        </div>
-
-        {/* Source-add tools: they act on the selected Agent's knowledge, so they
-            live next to the sources — not under the chat prompt. */}
-        <div className="source-tools">
+        {/* Source-add tools directly under the brand (company layout order).
+            The unified "+ 소스 추가" modal stays — our single entry point. */}
+        <div className="source-tools" aria-label="소스 추가 도구">
           <button className="tool source-add-btn" type="button" title="소스 추가 · 파일·폴더·URL·텍스트·이미지" onClick={() => openSourceModal(activeProfileId)} disabled={!activeProfileId}><Plus size={15} />소스 추가</button>
           <span className="tool-sep" />
           <button className={`tool toggle ${autoIndex ? "on" : ""}`} type="button" title={`추가 시 자동 임베딩: ${autoIndex ? "켜짐" : "꺼짐"}`} onClick={() => toggleAutoIndex()}>
@@ -3213,6 +3409,11 @@ function App() {
           <button className={`tool toggle ${folderTree ? "on" : ""}`} type="button" title={`폴더 추가 시 폴더 구조를 소스로 색인: ${folderTree ? "켜짐" : "꺼짐"}`} onClick={() => toggleFolderTree()}>
             <FolderTree size={15} />
           </button>
+        </div>
+
+        <div className="agent-toolbar">
+          <span className="agent-toolbar-label">Agents</span>
+          <button className="icon-button" type="button" title="Agent 추가" onClick={createProfile}><Plus size={18} /></button>
         </div>
 
         <div className="agent-search">
@@ -3845,6 +4046,79 @@ function highlightTermsInHtml(html, query) {
 
 function escapeRegExp(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeSettingsState(state = {}) {
+  const rawPresets = state?.presets && typeof state.presets === "object" ? state.presets : {};
+  const presets = {};
+  for (const [name, preset] of Object.entries(rawPresets)) {
+    presets[name] = normalizeSettingsForm(preset);
+  }
+  const activePreset = state?.activePreset && presets[state.activePreset]
+    ? state.activePreset
+    : Object.keys(presets)[0] || "default";
+  if (!Object.keys(presets).length) presets[activePreset] = normalizeSettingsForm({});
+  return { activePreset, presets };
+}
+
+function normalizeSettingsForm(preset = {}) {
+  return {
+    llm: {
+      provider: preset.llm?.provider || "openai-compatible",
+      baseUrl: preset.llm?.baseUrl || "",
+      model: preset.llm?.model || "",
+      visionModel: preset.llm?.visionModel || "",
+      apiKey: preset.llm?.apiKey || "",
+      gaussClientToken: preset.llm?.gaussClientToken || "",
+      gaussOpenapiToken: preset.llm?.gaussOpenapiToken || "",
+      gaussUserEmail: preset.llm?.gaussUserEmail || ""
+    },
+    embedding: {
+      backend: preset.embedding?.backend || "http",
+      url: preset.embedding?.url || "",
+      model: preset.embedding?.model || "",
+      dimensions: preset.embedding?.dimensions ?? null,
+      apiKey: preset.embedding?.apiKey || ""
+    }
+  };
+}
+
+function mergeGaussModelOptions(currentModel, models = []) {
+  const byId = new Map();
+  for (const model of Array.isArray(models) ? models : []) {
+    const rawId = typeof model === "string" ? model : model?.id;
+    const id = cleanGaussModelText(rawId);
+    if (!id) continue;
+    const rawName = typeof model === "string" ? "" : model?.name;
+    byId.set(id, { id, name: cleanGaussModelText(rawName) || GAUSS_MODEL_NAMES[id] || "" });
+  }
+  const current = cleanGaussModelText(currentModel);
+  if (current && !byId.has(current)) byId.set(current, { id: current, name: GAUSS_MODEL_NAMES[current] || "현재 Gauss 모델" });
+  return Array.from(byId.values());
+}
+
+function gaussModelLabel(model) {
+  if (!model) return "";
+  if (model.name && model.name !== model.id) return model.name;
+  return GAUSS_MODEL_NAMES[model.id] || "Gauss 모델";
+}
+
+function cleanGaussModelText(value) {
+  if (typeof value !== "string" && typeof value !== "number") return "";
+  const text = String(value || "").trim();
+  if (!text || /^\[object Object\](,\[object Object\])*$/i.test(text)) return "";
+  return text;
+}
+
+function displayLlmModel(llmProvider, gaussModels = []) {
+  if (!llmProvider) return "checking";
+  if (llmProvider.provider === "gauss-openapi") {
+    const modelId = String(llmProvider.model || "").trim();
+    const match = mergeGaussModelOptions(modelId, gaussModels).find((model) => model.id === modelId);
+    if (match?.name && match.name !== "현재 Gauss 모델") return match.name;
+    return "Gauss OpenAPI";
+  }
+  return llmProvider.model || llmProvider.provider || "checking";
 }
 
 async function fetchJson(url, options = {}) {

@@ -1568,6 +1568,41 @@ button.secondary.danger {
 
 .mini-btn { min-height: 30px; height: 30px; padding: 0 12px; font-size: 0.82rem; }
 
+.field-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+
+.connection-test {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.conn-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+
+.conn-pill.ok {
+  border-color: #b9ded2;
+  background: #e5f3ef;
+  color: var(--accent-dark);
+}
+
+.conn-pill.fail {
+  border-color: #efc9bd;
+  background: #fff0eb;
+  color: var(--danger);
+}
+
 
 /* ── Compact (docked-beside-Figma) mode ── */
 .shell.compact > .sidebar,
