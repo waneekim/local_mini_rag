@@ -3,10 +3,10 @@ import { createRoot } from "react-dom/client";
 import {
   BookOpen,
   Bot,
-  Camera,
   ChevronDown,
   ChevronRight,
   ClipboardCheck,
+  ClipboardPlus,
   Database,
   Download,
   File,
@@ -15,6 +15,7 @@ import {
   FolderTree,
   FolderUp,
   Globe,
+  ImagePlus,
   Link,
   Lock,
   Maximize2,
@@ -182,9 +183,8 @@ function App() {
   // Composer quick menus: persona add (+) and skills (✨) dropdowns next to the input.
   const [personaMenuOpen, setPersonaMenuOpen] = useState(false);
   const [skillMenuOpen, setSkillMenuOpen] = useState(false);
-  // Unified source-add modal: one entry point, one dialog with tabs for
-  // file / folder / url / text / image. { pid, tab }.
-  const [sourceModal, setSourceModal] = useState(null);
+  // Source-add dialog (텍스트·URL·이미지). 파일/폴더는 별도 아이콘으로 분리. { pid }.
+  const [sourceDialog, setSourceDialog] = useState(null);
   const [dlgTitle, setDlgTitle] = useState("");
   const [dlgText, setDlgText] = useState("");
   const [dlgUrl, setDlgUrl] = useState("");
@@ -354,7 +354,7 @@ function App() {
 
   useEffect(() => {
     function onClick() { setMenu(null); setPersonaMenuOpen(false); setSkillMenuOpen(false); }
-    function onKey(e) { if (e.key === "Escape") { setMenu(null); setSourceModal(null); setPersonaMenuOpen(false); setSkillMenuOpen(false); setEditingMode(null); } }
+    function onKey(e) { if (e.key === "Escape") { setMenu(null); setSourceDialog(null); setPersonaMenuOpen(false); setSkillMenuOpen(false); setEditingMode(null); } }
     // Paste a screenshot image anywhere in the app → extract text (native ⌃⌘⇧4 → ⌘V).
     function onPaste(e) {
       const item = [...(e.clipboardData?.items || [])].find((it) => it.type.startsWith("image/"));
@@ -1222,14 +1222,14 @@ function App() {
     setMenu({ x: e.clientX, y: e.clientY, ...payload });
   }
 
-  // ── Unified source-add modal (file / folder / url / text / image) ──
+  // ── Source-add dialog (텍스트·URL·이미지 — 파일/폴더는 별도 아이콘) ──
 
-  function openSourceModal(pid, tab = "file") {
+  function openSourceDialog(pid) {
     if (!pid) return;
     setDlgTitle("");
     setDlgText("");
     setDlgUrl("");
-    setSourceModal({ pid, tab });
+    setSourceDialog({ pid });
   }
 
   // Image sources reuse the file-upload endpoint: the backend already ingests
@@ -1240,31 +1240,31 @@ function App() {
     imageInputRef.current?.click();
   }
 
-  async function submitSourceText() {
-    if (!dlgText.trim() || !sourceModal) return;
-    const pid = sourceModal.pid;
-    setSourceModal(null);
+  // 추가: URL이 있으면 URL 소스(서버가 직접 가져오기 → 브라우저 렌더 →
+  // 스크린샷+비전 순으로 자동 폴백), 없으면 붙여넣은 텍스트를 소스로.
+  async function submitSourceDialog() {
+    if (!sourceDialog) return;
+    const pid = sourceDialog.pid;
+    const url = dlgUrl.trim();
+    if (url) {
+      setSourceDialog(null);
+      try {
+        await addUrl(url, dlgTitle.trim(), pid);
+      } catch (e) {
+        // 모든 자동 시도가 실패했을 때만 한 번: 시도 내역 + 링크 + 수동 안내.
+        setStatus("URL 추출 실패");
+        pushSystem(`⚠️ ${e.message}`);
+      }
+      return;
+    }
+    if (!dlgText.trim()) return;
+    setSourceDialog(null);
     setBusy(true);
     try {
       await addText(dlgTitle.trim() || "Pasted text", dlgText, pid);
       setStatus("텍스트 소스 추가됨");
     } finally {
       setBusy(false);
-    }
-  }
-
-  async function submitSourceUrl() {
-    if (!dlgUrl.trim() || !sourceModal) return;
-    const pid = sourceModal.pid;
-    setSourceModal(null);
-    try {
-      await addUrl(dlgUrl.trim(), dlgTitle.trim(), pid);
-    } catch (e) {
-      // The server auto-tries fetch → browser → screenshot and, on total
-      // failure, returns one guide (reasons + link + manual copy-paste steps).
-      // Surface it as a single system message — no button maze.
-      setStatus("URL 추출 실패");
-      pushSystem(`⚠️ ${e.message}`);
     }
   }
 
@@ -2394,7 +2394,9 @@ function App() {
         <div className="context-menu" style={{ left: menu.x, top: menu.y }} onClick={(e) => e.stopPropagation()}>
           {menu.kind === "agent" ? (
             <>
-              <button onClick={() => { openSourceModal(menu.pid); setMenu(null); }}><Plus size={14} />소스 추가</button>
+              <button onClick={() => { pickFiles(menu.pid); setMenu(null); }}><Upload size={14} />파일 추가</button>
+              <button onClick={() => { pickFolder(menu.pid); setMenu(null); }}><FolderUp size={14} />폴더 추가</button>
+              <button onClick={() => { openSourceDialog(menu.pid); setMenu(null); }}><ClipboardPlus size={14} />소스 추가 (텍스트·URL·이미지)</button>
               <button onClick={() => { openRules(menu.pid); setMenu(null); }}><ClipboardCheck size={14} />규칙(가이드)</button>
               <button onClick={() => { openReview(menu.pid); setMenu(null); }}><SpellCheck size={14} />검수(문장 교정)</button>
               <button onClick={() => { openGlossary(menu.pid); setMenu(null); }}><BookOpen size={14} />용어집(단어 사전)</button>
@@ -2826,81 +2828,42 @@ function App() {
         </div>
       )}
 
-      {/* Unified source-add modal: file / folder / url / text / image */}
-      {sourceModal && (
-        <div className="modal-overlay" onClick={() => setSourceModal(null)}>
+      {/* Source-add dialog: 텍스트·URL·이미지 (원래 다이얼로그 구성 — 파일/폴더는 별도 아이콘) */}
+      {sourceDialog && (
+        <div className="modal-overlay" onClick={() => setSourceDialog(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h2>소스 추가</h2>
-              <button className="icon-button" type="button" onClick={() => setSourceModal(null)}><X size={18} /></button>
-            </div>
-            <div className="source-tabs">
-              {[
-                { key: "file", label: "파일", icon: <Upload size={14} /> },
-                { key: "folder", label: "폴더", icon: <FolderUp size={14} /> },
-                { key: "url", label: "URL", icon: <Link size={14} /> },
-                { key: "text", label: "텍스트", icon: <FileText size={14} /> },
-                { key: "image", label: "이미지", icon: <Camera size={14} /> }
-              ].map((t) => (
-                <button
-                  key={t.key}
-                  type="button"
-                  className={`source-tab ${sourceModal.tab === t.key ? "on" : ""}`}
-                  onClick={() => setSourceModal((m) => ({ ...m, tab: t.key }))}
-                >
-                  {t.icon}{t.label}
-                </button>
-              ))}
+              <button className="icon-button" type="button" onClick={() => setSourceDialog(null)}><X size={18} /></button>
             </div>
             <div className="settings-section">
-              {sourceModal.tab === "file" && (
-                <div className="source-pick">
-                  <p className="source-hint">PDF · Word · PowerPoint · Excel · 텍스트(.txt/.md/.csv/.json/.html) 파일을 선택합니다. 여러 개 선택 가능.</p>
-                  <button type="button" onClick={() => { const pid = sourceModal.pid; setSourceModal(null); pickFiles(pid); }}><Upload size={15} /> 파일 선택</button>
-                </div>
-              )}
-              {sourceModal.tab === "folder" && (
-                <div className="source-pick">
-                  <p className="source-hint">폴더를 통째로 추가합니다. 🗂 토글이 켜져 있으면 폴더 트리 구조도 소스로 함께 색인됩니다.</p>
-                  <button type="button" onClick={() => { const pid = sourceModal.pid; setSourceModal(null); pickFolder(pid); }}><FolderUp size={15} /> 폴더 선택</button>
-                </div>
-              )}
-              {sourceModal.tab === "url" && (
-                <div className="settings-grid">
-                  <label>
-                    URL
-                    <input
-                      value={dlgUrl}
-                      autoFocus
-                      onChange={(e) => setDlgUrl(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submitSourceUrl(); } }}
-                      placeholder="https://example.com/article"
-                    />
-                  </label>
-                  <label>제목 <span className="optional">(선택 · 비우면 페이지 제목)</span><input value={dlgTitle} onChange={(e) => setDlgTitle(e.target.value)} placeholder="제목" /></label>
-                </div>
-              )}
-              {sourceModal.tab === "text" && (
-                <div className="settings-grid">
-                  <label>제목<input value={dlgTitle} onChange={(e) => setDlgTitle(e.target.value)} placeholder="제목 (선택)" /></label>
-                  <label>내용<textarea value={dlgText} onChange={(e) => setDlgText(e.target.value)} placeholder="텍스트 붙여넣기" style={{ minHeight: 180 }} /></label>
-                </div>
-              )}
-              {sourceModal.tab === "image" && (
-                <div className="source-pick">
-                  <p className="source-hint">이미지를 소스로 추가합니다 — OCR·비전으로 텍스트를 추출해 임베딩합니다 (png · jpg · webp · tif 등). 스크린샷을 <b>대화에 첨부</b>하려면 입력창의 📷를 쓰세요.</p>
-                  <button type="button" onClick={() => { const pid = sourceModal.pid; setSourceModal(null); pickImages(pid); }}><Camera size={15} /> 이미지 선택</button>
-                </div>
-              )}
+              <div className="settings-grid">
+                <label>
+                  URL <span className="optional">(선택 · 입력하면 웹페이지를 소스로 추가)</span>
+                  <input
+                    value={dlgUrl}
+                    autoFocus
+                    onChange={(e) => setDlgUrl(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submitSourceDialog(); } }}
+                    placeholder="https://example.com/article"
+                  />
+                </label>
+                <label>제목 <span className="optional">(선택 · 비우면 자동)</span><input value={dlgTitle} onChange={(e) => setDlgTitle(e.target.value)} placeholder="제목" /></label>
+                <label>내용 <span className="optional">(URL 없이 텍스트를 소스로 추가할 때)</span><textarea value={dlgText} onChange={(e) => setDlgText(e.target.value)} placeholder="텍스트 붙여넣기" style={{ minHeight: 180 }} /></label>
+              </div>
+              <p className="skill-group-label optional">
+                URL은 <b>직접 가져오기 → 브라우저 렌더 → 스크린샷+비전</b> 순으로 자동 추출을 시도하고,
+                모두 실패한 경우에만 링크와 수동(복사→붙여넣기) 안내를 드립니다.
+              </p>
+              <div className="skill-repo-row">
+                <button type="button" className="secondary" onClick={() => { const pid = sourceDialog.pid; setSourceDialog(null); pickImages(pid); }}>
+                  <ImagePlus size={15} /> 이미지 선택 (OCR·비전으로 추출)
+                </button>
+              </div>
             </div>
             <div className="modal-footer">
-              <button type="button" className="secondary" onClick={() => setSourceModal(null)}>닫기</button>
-              {sourceModal.tab === "url" && (
-                <button type="button" onClick={submitSourceUrl} disabled={busy || !dlgUrl.trim()}>{busy ? "가져오는 중…" : "추가"}</button>
-              )}
-              {sourceModal.tab === "text" && (
-                <button type="button" onClick={submitSourceText} disabled={!dlgText.trim()}>추가</button>
-              )}
+              <button type="button" className="secondary" onClick={() => setSourceDialog(null)}>취소</button>
+              <button type="button" onClick={submitSourceDialog} disabled={busy || (!dlgUrl.trim() && !dlgText.trim())}>{busy ? "가져오는 중…" : "추가"}</button>
             </div>
           </div>
         </div>
@@ -3381,10 +3344,12 @@ function App() {
           </button>
         </div>
 
-        {/* Source-add tools directly under the brand (company layout order).
-            The unified "+ 소스 추가" modal stays — our single entry point. */}
+        {/* Source-add tools directly under the brand (company layout order):
+            파일 / 폴더 아이콘 + 통합 소스추가(텍스트·URL·이미지) 아이콘. */}
         <div className="source-tools" aria-label="소스 추가 도구">
-          <button className="tool source-add-btn" type="button" title="소스 추가 · 파일·폴더·URL·텍스트·이미지" onClick={() => openSourceModal(activeProfileId)} disabled={!activeProfileId}><Plus size={15} />소스 추가</button>
+          <button className="tool" type="button" title="파일 추가" onClick={() => pickFiles(activeProfileId)} disabled={!activeProfileId}><Upload size={16} /></button>
+          <button className="tool" type="button" title="폴더 추가" onClick={() => pickFolder(activeProfileId)} disabled={!activeProfileId}><FolderUp size={16} /></button>
+          <button className="tool" type="button" title="소스 추가 · 텍스트·URL·이미지" onClick={() => openSourceDialog(activeProfileId)} disabled={!activeProfileId}><ClipboardPlus size={16} /></button>
           <span className="tool-sep" />
           <button className={`tool toggle ${autoIndex ? "on" : ""}`} type="button" title={`추가 시 자동 임베딩: ${autoIndex ? "켜짐" : "꺼짐"}`} onClick={() => toggleAutoIndex()}>
             <Zap size={15} />
