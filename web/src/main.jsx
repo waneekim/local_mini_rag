@@ -2726,10 +2726,27 @@ function App() {
             <div className="settings-section">
               <h3>LLM</h3>
               <div className="settings-grid">
-                <label>서버 URL<input value={settingsForm.llm.baseUrl || ""} onChange={(e) => setLlmField("baseUrl", e.target.value)} placeholder="http://localhost:1234/v1" /></label>
-                <label>모델명<input value={settingsForm.llm.model || ""} onChange={(e) => setLlmField("model", e.target.value)} placeholder="qwen2.5-14b-instruct" /></label>
-                <label>비전 모델 <span className="optional">(스크린샷 검증용 · 선택)</span><input value={settingsForm.llm.visionModel || ""} onChange={(e) => setLlmField("visionModel", e.target.value)} placeholder="qwen2-vl-7b-instruct" /></label>
+                <label>
+                  프로바이더
+                  <select value={settingsForm.llm.provider || "openai-compatible"} onChange={(e) => setLlmField("provider", e.target.value)}>
+                    <option value="openai-compatible">OpenAI 호환 (LM Studio · vLLM · 사내 서버)</option>
+                    <option value="gauss-openapi">Gauss OpenAPI (삼성 사내 · chat 전용)</option>
+                  </select>
+                </label>
+                <label>서버 URL<input value={settingsForm.llm.baseUrl || ""} onChange={(e) => setLlmField("baseUrl", e.target.value)} placeholder={settingsForm.llm.provider === "gauss-openapi" ? "https://genai-openapi.sec.samsung.net/.../api-chat" : "http://localhost:1234/v1"} /></label>
+                <label>모델{settingsForm.llm.provider === "gauss-openapi" ? " ID" : "명"}<input value={settingsForm.llm.model || ""} onChange={(e) => setLlmField("model", e.target.value)} placeholder={settingsForm.llm.provider === "gauss-openapi" ? "0196f1fc-…-74dbddb971d0" : "qwen2.5-14b-instruct"} /></label>
+                {settingsForm.llm.provider !== "gauss-openapi" && (
+                  <label>비전 모델 <span className="optional">(선택)</span><input value={settingsForm.llm.visionModel || ""} onChange={(e) => setLlmField("visionModel", e.target.value)} placeholder="qwen2-vl-7b-instruct" /></label>
+                )}
                 <label>API Key <span className="optional">(선택)</span><input type="password" value={settingsForm.llm.apiKey || ""} onChange={(e) => setLlmField("apiKey", e.target.value)} placeholder="없으면 비워두세요" /></label>
+                {settingsForm.llm.provider === "gauss-openapi" && (
+                  <>
+                    <label>Gauss Client Token<input type="password" value={settingsForm.llm.gaussClientToken || ""} onChange={(e) => setLlmField("gaussClientToken", e.target.value)} placeholder="x-generative-ai-client" /></label>
+                    <label>Gauss OpenAPI Token<input type="password" value={settingsForm.llm.gaussOpenapiToken || ""} onChange={(e) => setLlmField("gaussOpenapiToken", e.target.value)} placeholder="Bearer …" /></label>
+                    <label>Gauss User Email<input value={settingsForm.llm.gaussUserEmail || ""} onChange={(e) => setLlmField("gaussUserEmail", e.target.value)} placeholder="name@samsung.com" /></label>
+                    <p className="settings-note optional">Gauss는 chat 전용입니다 — 이미지/비전은 지원하지 않으며, 임베딩은 아래 임베딩 서버를 별도로 씁니다.</p>
+                  </>
+                )}
               </div>
             </div>
 

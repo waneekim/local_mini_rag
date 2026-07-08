@@ -1071,6 +1071,11 @@ input:focus, select:focus, textarea:focus {
 }
 
 .settings-grid input { font-size: 0.9rem; padding: 9px 11px; }
+.settings-grid select {
+  font-size: 0.9rem; padding: 9px 11px; border-radius: 8px;
+  border: 1px solid var(--border, #2a2a2a); background: var(--bg); color: var(--ink, inherit);
+}
+.settings-note { margin: 2px 0 0; font-size: 0.82rem; line-height: 1.5; }
 
 .optional { font-weight: 400; color: var(--muted); font-size: 0.85em; }
 
