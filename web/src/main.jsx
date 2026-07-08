@@ -3441,6 +3441,7 @@ function App() {
               const embedded = list.filter((s) => s.status === "indexed").length;
               const pending = list.length - embedded;
               const tree = buildTree(shownSources);
+              const jobRunning = job && job.profile_id === p.id && !["completed", "completed_with_errors", "failed"].includes(job.status);
               return (
               <div key={p.id} className={`agent ${isActive ? "active" : ""} ${dropTarget === p.id ? "drop" : ""}`}>
                 <div
@@ -3471,6 +3472,7 @@ function App() {
                   ) : (
                     <>
                       <span className="agent-name">{p.name}</span>
+                      {jobRunning && <span className="busy-spinner agent-busy" title={job.message || "인덱싱 중"} aria-label="인덱싱 중" />}
                       {sourcesByProfile[p.id] && list.length > 0 && (
                         <span className={`agent-count ${pending === 0 ? "done" : ""}`} title={`임베딩 ${embedded}/${list.length}`}>
                           {embedded}/{list.length}
@@ -3503,7 +3505,14 @@ function App() {
                               새 항목 {pending}
                             </button>
                           )}
-                          <span className={`embed-summary ${pending === 0 ? "done" : ""}`}>{embedded}/{list.length} 임베딩됨</span>
+                          {jobRunning ? (
+                            <span className="index-progress" title={job.message || "인덱싱 중"}>
+                              <span className="busy-spinner" aria-hidden="true" />
+                              {job.total_sources ? `${job.processed_sources || 0}/${job.total_sources} 인덱싱 중` : "인덱싱 중"}
+                            </span>
+                          ) : (
+                            <span className={`embed-summary ${pending === 0 ? "done" : ""}`}>{embedded}/{list.length} 임베딩됨</span>
+                          )}
                         </div>
                         {renderTree(tree, p.id, p.id)}
                       </>

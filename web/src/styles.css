@@ -402,8 +402,46 @@ input:focus, select:focus, textarea:focus {
 
 .src-dot.indexed { border-color: var(--accent); background: var(--accent); }
 .src-dot.failed_with_action { border-color: var(--danger); background: var(--danger); }
+
+/* Indexing in progress — the status dot becomes a spinning ring */
 .src-dot.embedding,
-.src-dot.extracting { border-color: var(--warning); background: var(--warning); }
+.src-dot.extracting {
+  border-color: var(--warning);
+  border-top-color: transparent;
+  background: transparent;
+  animation: busy-spin 0.8s linear infinite;
+}
+
+@keyframes busy-spin { to { transform: rotate(360deg); } }
+
+.busy-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(0, 122, 104, 0.25);
+  border-top-color: var(--accent);
+  animation: busy-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+.index-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--accent-dark);
+}
+
+.busy-spinner.agent-busy { width: 10px; height: 10px; border-width: 1.5px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .busy-spinner,
+  .src-dot.embedding,
+  .src-dot.extracting { animation: none; }
+}
 
 .tree-row.file:hover .src-dot { display: none; }
 
