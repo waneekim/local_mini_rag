@@ -67,7 +67,11 @@ class RagService {
       baseUrl: llm.baseUrl || undefined,
       model: llm.model || undefined,
       visionModel: llm.visionModel || undefined,
-      apiKey: llm.apiKey || undefined
+      apiKey: llm.apiKey || undefined,
+      // Gauss OpenAPI credentials (only set when the active preset uses gauss-openapi).
+      gaussClientToken: llm.gaussClientToken || undefined,
+      gaussOpenapiToken: llm.gaussOpenapiToken || undefined,
+      gaussUserEmail: llm.gaussUserEmail || undefined
     });
     const emb = settings.embedding || {};
     this.embeddings = new EmbeddingService({

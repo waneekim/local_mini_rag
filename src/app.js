@@ -11,6 +11,7 @@ import { createRagService } from "./rag/ragService.js";
 import { ModeStore } from "./rag/modeStore.js";
 import { SettingsStore } from "./rag/settingsStore.js";
 import { SkillService } from "./rag/skills.js";
+import { extractGaussModels, extractGaussModelIds, gaussHeaders, gaussModelsUrl } from "./rag/llmProvider.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, "..");
@@ -127,12 +128,22 @@ export async function createApp(options = {}) {
     const body = request.body || {};
     const llmKey = body.llm?.apiKey || "";
     const embUrl = String(body.embedding?.url || "");
+    // Gauss presets authenticate with tokens against a /models endpoint, not the
+    // OpenAI /models path, so probe them separately.
+    const llmProbe = normalizeLlmProvider(body.llm || {}) === "gauss-openapi"
+      ? await probeGaussServer(body.llm || {})
+      : await probeOpenAiServer(body.llm?.baseUrl || "", llmKey);
     return {
-      llm: await probeOpenAiServer(body.llm?.baseUrl || "", llmKey),
+      llm: llmProbe,
       embedding: embUrl
         ? await probeOpenAiServer(embUrl.replace(/\/embeddings\/?$/, ""), body.embedding?.apiKey || llmKey)
         : { ok: true, detail: "로컬 임베딩 사용 (별도 서버 불필요)" }
     };
+  });
+
+  // List Gauss models for a candidate config (settings UI / API model discovery).
+  app.post("/api/settings/gauss/models", async (request) => {
+    return probeGaussServer(request.body?.llm || request.body || {}, { requireModel: false });
   });
 
   app.put("/api/settings", async (request) => {
@@ -483,4 +494,65 @@ function extractAdminToken(request) {
   const auth = request.headers["authorization"] || "";
   const match = /^Bearer\s+(.+)$/i.exec(auth);
   return match ? match[1] : "";
+}
+
+// ── Gauss OpenAPI connection probe (ported from the company build) ──
+
+function normalizeLlmProvider(llm = {}) {
+  const provider = String(llm.provider || "").trim();
+  if (provider) return provider;
+  return looksLikeGaussConfig(llm) ? "gauss-openapi" : "openai-compatible";
+}
+
+function looksLikeGaussConfig(llm = {}) {
+  const url = String(llm.baseUrl || "");
+  return /gauss|api-chat|openapi\/chat\/v1/i.test(url) || Boolean(llm.gaussClientToken || llm.gaussOpenapiToken || llm.gaussUserEmail);
+}
+
+function formatGaussModel(model) {
+  if (!model) return "model";
+  return model.name && model.name !== model.id ? model.name : "Gauss model";
+}
+
+function resolveGaussConfig(llm = {}) {
+  return {
+    baseUrl: llm.baseUrl || process.env.GAUSS_BASE_URL || "",
+    model: llm.model || process.env.GAUSS_MODEL_ID || "",
+    gaussClientToken: llm.gaussClientToken || process.env.GAUSS_CLIENT_TOKEN || "",
+    gaussOpenapiToken: llm.gaussOpenapiToken || process.env.GAUSS_OPENAPI_TOKEN || "",
+    gaussUserEmail: llm.gaussUserEmail || process.env.GAUSS_USER_EMAIL || ""
+  };
+}
+
+async function probeGaussServer(llm = {}, { requireModel = true } = {}) {
+  const config = resolveGaussConfig(llm);
+  const missing = [];
+  if (!config.baseUrl) missing.push("baseUrl");
+  if (requireModel && !config.model) missing.push("model");
+  if (!config.gaussClientToken) missing.push("gaussClientToken");
+  if (!config.gaussOpenapiToken) missing.push("gaussOpenapiToken");
+  if (!config.gaussUserEmail) missing.push("gaussUserEmail");
+  if (missing.length) return { ok: false, detail: "Missing Gauss settings: " + missing.join(", "), models: [] };
+
+  try {
+    const response = await fetch(gaussModelsUrl(config.baseUrl), {
+      headers: gaussHeaders(config),
+      signal: AbortSignal.timeout(Number(process.env.RAG_URL_TIMEOUT_MS || 8000))
+    });
+    if (response.status === 401 || response.status === 403) return { ok: false, detail: "Authentication failed", models: [] };
+    if (!response.ok) return { ok: false, detail: "Server responded with HTTP " + response.status, models: [] };
+    const payload = await response.json().catch(() => ({}));
+    const models = extractGaussModels(payload);
+    const modelIds = extractGaussModelIds(payload);
+    const selected = models.find((model) => model.id === config.model) || null;
+    if (config.model && modelIds.length && !modelIds.includes(config.model)) {
+      return { ok: false, detail: "Connected, but configured model was not found (" + modelIds.length + " model(s))", selectedModel: config.model, models };
+    }
+    if (selected) {
+      return { ok: true, detail: "Connected, " + formatGaussModel(selected) + " available (" + modelIds.length + " model(s))", selectedModel: config.model, models };
+    }
+    return { ok: true, detail: modelIds.length ? "Connected, " + modelIds.length + " model(s)" : "Connected", selectedModel: config.model, models };
+  } catch (error) {
+    return { ok: false, detail: "Connection failed: " + error.message, models: [] };
+  }
 }

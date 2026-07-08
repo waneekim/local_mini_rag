@@ -45,14 +45,22 @@ export class SettingsStore {
   _effective(stored = {}) {
     const llm = stored.llm || {};
     const emb = stored.embedding || {};
+    // Gauss (Samsung internal OpenAPI) is a chat-only provider with its own
+    // base URL / model env vars and token credentials; every other provider
+    // uses the standard OpenAI-compatible vars.
+    const provider = llm.provider ?? process.env.LLM_PROVIDER ?? "openai-compatible";
+    const isGauss = provider === "gauss-openapi";
     const embUrl = emb.url ?? process.env.EMBEDDINGS_URL ?? "";
     return {
       llm: {
-        provider: llm.provider ?? process.env.LLM_PROVIDER ?? "openai-compatible",
-        baseUrl: llm.baseUrl ?? process.env.LLM_BASE_URL ?? "",
-        model: llm.model ?? process.env.LLM_MODEL ?? "",
+        provider,
+        baseUrl: llm.baseUrl ?? (isGauss ? process.env.GAUSS_BASE_URL : process.env.LLM_BASE_URL) ?? "",
+        model: llm.model ?? (isGauss ? process.env.GAUSS_MODEL_ID : process.env.LLM_MODEL) ?? "",
         visionModel: llm.visionModel ?? process.env.VISION_MODEL ?? "",
-        apiKey: llm.apiKey ?? process.env.LLM_API_KEY ?? ""
+        apiKey: llm.apiKey ?? process.env.LLM_API_KEY ?? "",
+        gaussClientToken: llm.gaussClientToken ?? process.env.GAUSS_CLIENT_TOKEN ?? "",
+        gaussOpenapiToken: llm.gaussOpenapiToken ?? process.env.GAUSS_OPENAPI_TOKEN ?? "",
+        gaussUserEmail: llm.gaussUserEmail ?? process.env.GAUSS_USER_EMAIL ?? ""
       },
       embedding: {
         backend: emb.backend ?? process.env.RAG_EMBEDDING_BACKEND ?? (embUrl ? "http" : "local-ngram"),
